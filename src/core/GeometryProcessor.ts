@@ -1,141 +1,176 @@
 import fs from 'fs';
-import Module, { Manifold, ManifoldToplevel } from 'manifold-3d';
+import Module, { Manifold, ManifoldToplevel, CrossSection } from 'manifold-3d';
 
 export class GeometryProcessor {
     private wasm: ManifoldToplevel | null = null;
 
     async init() {
         if (!this.wasm) {
-            console.log("⚙️ Inizializzazione Manifold WASM...");
             this.wasm = await Module();
             this.wasm.setup();
         }
     }
 
-    async sliceAndSave(
-        stlPath: string, 
-        cutPath: {x: number, y: number}[],
-        imageWidth: number, 
-        imageHeight: number,
-        outputPrefix: string,
-        toleranceMm: number = 0.2
-    ) {
+    public async loadMesh(stlPath: string): Promise<Manifold> {
+        if (!this.wasm) await this.init();
+        console.log(`📦 Loading mesh: ${stlPath}`);
+        return this.loadStl(stlPath);
+    }
+
+    public saveMesh(mesh: Manifold, path: string) {
+        console.log(`💾 Saving: ${path}`);
+        this.saveStl(mesh, path);
+    }
+
+    // --- TAGLIO VERTICALE ---
+    async sliceVertical(
+        meshOriginal: Manifold,
+        cutPathMm: {x: number, y: number}[],
+        bounds: {min: number[], max: number[]},
+        toleranceMm: number
+    ): Promise<{left: Manifold, right: Manifold}> {
+        
         if (!this.wasm) await this.init();
         const m = this.wasm!;
-
-        // 1. CARICAMENTO
-        console.log(`📦 Caricamento e Ottimizzazione Mesh: ${stlPath}`);
-        const meshOriginal = this.loadStl(stlPath);
         
-        const bounds = meshOriginal.boundingBox();
-        const widthMm = bounds.max[0] - bounds.min[0];
-        const heightMm = bounds.max[1] - bounds.min[1];
-        const depthMm = bounds.max[2] - bounds.min[2];
-
-        console.log(`📏 Dimensioni: ${widthMm.toFixed(1)}x${heightMm.toFixed(1)}x${depthMm.toFixed(1)}mm`);
+        const pathSimple = this.simplifyPath(cutPathMm, 0.5);
         
-        // 2. PREPARAZIONE TAGLIO
-        const scaleX = widthMm / imageWidth;
-        const scaleY = heightMm / imageHeight;
-        const offsetX = bounds.min[0];
-        
-        let pathMm = cutPath.map(p => ({
-            x: offsetX + (p.x * scaleX),
-            y: bounds.max[1] - (p.y * scaleY) 
-        }));
-
-        // Semplificazione percorso
-        const originalPoints = pathMm.length;
-        pathMm = this.simplifyPath(pathMm, 0.5); 
-        console.log(`📉 Semplificazione Percorso: ${originalPoints} -> ${pathMm.length} punti.`);
-
-        console.log("✂️ Generazione volumi di taglio...");
-        
-        // Estendiamo leggermente di più i bordi per sicurezza
+        // Parametri geometrici
         const farLeft = bounds.min[0] - 50; 
         const farRight = bounds.max[0] + 50;
-        const hugeZ = depthMm * 3; 
+        const depthMm = bounds.max[2] - bounds.min[2];
+        const hugeZ = 500.0; // depthMm * 3; 
         const halfGap = toleranceMm / 2;
 
-        const leftPoly = this.createSidePolygon(pathMm, farLeft, halfGap, true);
-        const rightPoly = this.createSidePolygon(pathMm, farRight, halfGap, false);
+        // 1. Creazione Poligoni
+        const leftPoly = this.createSidePolygon(pathSimple, farLeft, halfGap, true);
+        const rightPoly = this.createSidePolygon(pathSimple, farRight, halfGap, false);
 
-        // Creazione Tools
+        // 2. Creazione CrossSections (WASM Objects -> Devono essere liberati)
         const leftCS = new (m as any).CrossSection([leftPoly]);
         const rightCS = new (m as any).CrossSection([rightPoly]);
         
-        // Estrusione
+        // 3. Estrusione (WASM Objects -> Liberare)
         let leftTool = leftCS.extrude(hugeZ, 0, 0, [1, 1]);
         let rightTool = rightCS.extrude(hugeZ, 0, 0, [1, 1]);
 
-        // Traslazione Z (Partiamo leggermente più in basso e finiamo più in alto per coprire tutto)
+        // Traslazione
         const zStart = bounds.min[2] - 5.0; 
-        leftTool = leftTool.translate([0, 0, zStart]);
-        rightTool = rightTool.translate([0, 0, zStart]);
+        const leftToolMoved = leftTool.translate([0, 0, zStart]);
+        const rightToolMoved = rightTool.translate([0, 0, zStart]);
 
-        // 3. INTERSEZIONE
-        console.log("✨ Esecuzione Boolean Intersect (Richiede molta RAM)...");
-        
-        try {
-            const partLeft = meshOriginal.intersect(leftTool);
-            const partRight = meshOriginal.intersect(rightTool);
+        // 4. Intersezione
+        const resultLeft = meshOriginal.intersect(leftToolMoved);
+        const resultRight = meshOriginal.intersect(rightToolMoved);
 
-            const countLeft = partLeft.numTri();
-            const countRight = partRight.numTri();
+        // 5. PULIZIA MEMORIA (CRUCIALE)
+        // Liberiamo gli oggetti intermedi che non servono più
+        leftCS.delete();
+        rightCS.delete();
+        leftTool.delete();
+        rightTool.delete();
+        leftToolMoved.delete();
+        rightToolMoved.delete();
 
-            console.log(`📊 Risultati: Sinistra=${countLeft} tri, Destra=${countRight} tri`);
-
-            if (countLeft > 0) {
-                console.log("💾 Salvataggio parte sinistra...");
-                this.saveStl(partLeft, `${outputPrefix}_left.stl`);
-            } else {
-                console.warn("⚠️ Parte Sinistra vuota! Possibile problema di coordinate o winding.");
-            }
-            
-            if (countRight > 0) {
-                console.log("💾 Salvataggio parte destra...");
-                this.saveStl(partRight, `${outputPrefix}_right.stl`);
-            }
-            
-            console.log("✅ Operazione conclusa con successo!");
-            
-        } catch (e) {
-            console.error("❌ ERRORE CRITICO in Manifold.");
-            throw e;
-        }
+        return { left: resultLeft, right: resultRight };
     }
 
-    // --- FIX WINDING ORDER ---
+    // --- TAGLIO ORIZZONTALE ---
+    async sliceHorizontal(
+        meshOriginal: Manifold,
+        cutPathMm: {x: number, y: number}[], 
+        bounds: {min: number[], max: number[]},
+        toleranceMm: number
+    ): Promise<{top: Manifold, bottom: Manifold}> {
+        
+        if (!this.wasm) await this.init();
+        const m = this.wasm!;
+        
+        const pathSimple = this.simplifyPath(cutPathMm, 0.5);
+
+        const farTop = bounds.max[1] + 50; 
+        const farBottom = bounds.min[1] - 50;
+        const depthMm = bounds.max[2] - bounds.min[2];
+        const hugeZ = 500.0; // depthMm * 3;
+        const halfGap = toleranceMm / 2;
+
+        const topPoly = this.createHorizontalPolygon(pathSimple, farTop, halfGap, true);
+        const bottomPoly = this.createHorizontalPolygon(pathSimple, farBottom, halfGap, false);
+
+        // WASM Allocations
+        const topCS = new (m as any).CrossSection([topPoly]);
+        const bottomCS = new (m as any).CrossSection([bottomPoly]);
+
+        let topTool = topCS.extrude(hugeZ, 0, 0, [1, 1]);
+        let bottomTool = bottomCS.extrude(hugeZ, 0, 0, [1, 1]);
+
+        const zStart = bounds.min[2] - 5.0;
+        const topToolMoved = topTool.translate([0, 0, zStart]);
+        const bottomToolMoved = bottomTool.translate([0, 0, zStart]);
+
+        const resultTop = meshOriginal.intersect(topToolMoved);
+        const resultBottom = meshOriginal.intersect(bottomToolMoved);
+
+        // CLEANUP
+        topCS.delete();
+        bottomCS.delete();
+        topTool.delete();
+        bottomTool.delete();
+        topToolMoved.delete();
+        bottomToolMoved.delete();
+
+        return { top: resultTop, bottom: resultBottom };
+    }
+
+    // --- Helpers (Invariati, ma inclusi per completezza) ---
     private createSidePolygon(path: {x:number, y:number}[], limitX: number, gapOffset: number, isLeft: boolean): number[][] {
         const poly: number[][] = [];
         const shiftX = isLeft ? -gapOffset : gapOffset;
-
-        // Path originale: dall'alto (Y max) al basso (Y min)
-        // Dobbiamo disegnare in senso Antiorario (CCW)
-        
-        if (isLeft) {
-            // LATO SINISTRO (CCW)
-            // 1. Iniziamo dall'angolo Alto-Sinistra
+        if (isLeft) { // CCW
             poly.push([limitX, path[0].y]); 
-            // 2. Scendiamo all'angolo Basso-Sinistra
             poly.push([limitX, path[path.length-1].y]);
-            
-            // 3. Risaliamo lungo il percorso di taglio (dal basso all'alto)
-            // Quindi iteriamo il path al contrario
-            for (let i = path.length - 1; i >= 0; i--) {
-                poly.push([path[i].x + shiftX, path[i].y]);
-            }
-        } else {
-            // LATO DESTRO (CCW)
-            // 1. Scendiamo lungo il percorso di taglio (dall'alto al basso)
-            for (let i = 0; i < path.length; i++) {
-                poly.push([path[i].x + shiftX, path[i].y]);
-            }
-            
-            // 2. Andiamo all'angolo Basso-Destra
+            for (let i = path.length - 1; i >= 0; i--) poly.push([path[i].x + shiftX, path[i].y]);
+        } else { // CCW
+            for (let i = 0; i < path.length; i++) poly.push([path[i].x + shiftX, path[i].y]);
             poly.push([limitX, path[path.length-1].y]);
-            // 3. Risaliamo all'angolo Alto-Destra
             poly.push([limitX, path[0].y]);
+        }
+        return poly;
+    }
+
+// Poligono Orizzontale (Chiude Sopra o Sotto)
+    // FIX: Ordine dei vertici corretto in senso Antiorario (CCW)
+    private createHorizontalPolygon(path: {x:number, y:number}[], limitY: number, gapOffset: number, isTop: boolean): number[][] {
+        const poly: number[][] = [];
+        const shiftY = isTop ? gapOffset : -gapOffset; 
+        
+        // Path viene fornito da Sinistra (X Min) a Destra (X Max)
+        
+        if (isTop) {
+            // LATO ALTO (Top) - Vogliamo l'area SOPRA il taglio.
+            // CCW Order: Basso-Sx -> Basso-Dx -> Alto-Dx -> Alto-Sx
+            
+            // 1. Percorriamo il taglio da SX a DX (Basso)
+            for (let i = 0; i < path.length; i++) {
+                poly.push([path[i].x, path[i].y + shiftY]);
+            }
+            // 2. Saliamo all'angolo Alto-Destra
+            poly.push([path[path.length-1].x, limitY]);
+            // 3. Andiamo all'angolo Alto-Sinistra
+            poly.push([path[0].x, limitY]);
+            
+        } else {
+            // LATO BASSO (Bottom) - Vogliamo l'area SOTTO il taglio.
+            // CCW Order: Alto-Dx -> Alto-Sx -> Basso-Sx -> Basso-Dx
+            
+            // 1. Percorriamo il taglio da DX a SX (Alto - Inverso)
+            for (let i = path.length - 1; i >= 0; i--) {
+                poly.push([path[i].x, path[i].y + shiftY]);
+            }
+            // 2. Scendiamo all'angolo Basso-Sinistra
+            poly.push([path[0].x, limitY]);
+            // 3. Andiamo all'angolo Basso-Destra
+            poly.push([path[path.length-1].x, limitY]);
         }
         
         return poly;
@@ -154,9 +189,7 @@ export class GeometryProcessor {
             const recResults1 = this.simplifyPath(points.slice(0, index + 1), epsilon);
             const recResults2 = this.simplifyPath(points.slice(index, end + 1), epsilon);
             return [...recResults1.slice(0, recResults1.length - 1), ...recResults2];
-        } else {
-            return [points[0], points[end]];
-        }
+        } else { return [points[0], points[end]]; }
     }
 
     private perpendicularDistance(point: {x:number, y:number}, lineStart: {x:number, y:number}, lineEnd: {x:number, y:number}): number {
@@ -175,7 +208,6 @@ export class GeometryProcessor {
         const vertArray: number[] = []; 
         const triVerts: number[] = []; 
         let uniqueVertCount = 0;
-
         for (let i = 0; i < numTriangles; i++) {
             const offset = headerSize + (i * 50);
             for (let v = 0; v < 3; v++) {
@@ -183,7 +215,7 @@ export class GeometryProcessor {
                 const x = buffer.readFloatLE(vOffset);
                 const y = buffer.readFloatLE(vOffset + 4);
                 const z = buffer.readFloatLE(vOffset + 8);
-                const key = `${x.toFixed(4)},${y.toFixed(4)},${z.toFixed(4)}`;
+                const key = `${x.toFixed(3)},${y.toFixed(3)},${z.toFixed(3)}`;
                 let idx = vertMap.get(key);
                 if (idx === undefined) {
                     idx = uniqueVertCount;
@@ -194,7 +226,7 @@ export class GeometryProcessor {
                 triVerts.push(idx);
             }
         }
-        console.log(`   Input: ${numTriangles} triangoli -> ${uniqueVertCount} vertici.`);
+        console.log(`   Input Triangoli: ${numTriangles}, Vertici Unici: ${uniqueVertCount}`);
         const vertProperties = new Float32Array(vertArray);
         const triVertsArray = new Uint32Array(triVerts);
         const meshObj = { numProp: 3, vertProperties: vertProperties, triVerts: triVertsArray };
@@ -203,12 +235,11 @@ export class GeometryProcessor {
 
     private saveStl(manifoldMesh: Manifold, filePath: string) {
         let mesh;
-        try { mesh = manifoldMesh.getMesh(); } catch(e) { console.error(`❌ Errore estrazione mesh.`); throw e; }
+        try { mesh = manifoldMesh.getMesh(); } catch(e) { console.error(`❌ Errore mesh export ${filePath}`); return; }
         const numTriangles = mesh.triVerts.length / 3;
-        console.log(`   -> Scrittura ${filePath} (${numTriangles} tri)...`);
         const bufferSize = 84 + (numTriangles * 50);
         const buffer = Buffer.alloc(bufferSize);
-        buffer.write("HueSlicer Export", 0); 
+        buffer.write("HueSlicer", 0); 
         buffer.writeUInt32LE(numTriangles, 80);
         let offset = 84;
         const verts = mesh.vertProperties; 
