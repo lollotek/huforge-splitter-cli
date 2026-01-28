@@ -1,16 +1,8 @@
-/**
- * HueSlicer - Core Algorithm Prototype
- * Obiettivo: Trovare il percorso a 'costo minimo' dall'alto al basso.
- * In HueForge: Costo Basso = Bordi/Dettagli (nascondono il taglio).
- * Costo Alto = Zone Piatte (il taglio si vede).
- */
-
-type Point = { x: number; y: number };
-
 export class SeamFinder {
     private width: number;
     private height: number;
-    private data: number[][]; // La mappa di altezza (0-255 o float)
+    private data: number[][]; 
+    private mask: boolean[][] | null = null; // Nuova Maschera Opzionale
 
     constructor(heightMap: number[][]) {
         this.data = heightMap;
@@ -18,67 +10,76 @@ export class SeamFinder {
         this.width = heightMap[0].length;
     }
 
-    // 1. Calcola la "Mappa dei Costi" (Inversa del gradiente)
-    // Se c'è una forte differenza tra pixel vicini (bordo), il costo è BASSO.
-    // Se è piatto, il costo è ALTO.
+    // Permette di caricare una maschera (true = zona permessa, false = zona proibita)
+    public setMask(mask: boolean[][]) {
+        // Verifica dimensioni
+        if (mask.length !== this.height || mask[0].length !== this.width) {
+            console.warn("⚠️ Warning: Dimensioni maschera diverse dalla mappa. La maschera verrà ignorata.");
+            return;
+        }
+        this.mask = mask;
+    }
+
     private calculateEnergyMap(): number[][] {
         const energyMap: number[][] = Array(this.height).fill(0).map(() => Array(this.width).fill(0));
 
         for (let y = 0; y < this.height; y++) {
             for (let x = 0; x < this.width; x++) {
-                // Calcolo semplice del gradiente (differenza col vicino destro)
+                // SE C'È UNA MASCHERA e siamo fuori zona -> Costo Infinito
+                if (this.mask && !this.mask[y][x]) {
+                    energyMap[y][x] = Infinity;
+                    continue;
+                }
+
                 const rightNeighbor = x < this.width - 1 ? this.data[y][x + 1] : this.data[y][x];
                 const gradient = Math.abs(this.data[y][x] - rightNeighbor);
                 
-                // FORMULA CHIAVE: 
-                // Più alto è il gradiente, più basso è il costo.
-                // Aggiungiamo 1 per evitare divisioni per zero.
-                // 100 è un peso arbitrario per penalizzare le zone piatte.
+                // Costo standard: Più alto il gradiente (bordo), minore il costo.
                 energyMap[y][x] = 100 / (gradient + 1); 
             }
         }
         return energyMap;
     }
 
-    // 2. Dynamic Programming per trovare il percorso
-    public findVerticalSeam(roiStart: number, roiEnd: number): Point[] {
+    public findVerticalSeam(roiStart: number, roiEnd: number): {x: number, y: number}[] {
         const energyMap = this.calculateEnergyMap();
-        
-        // Matrice di accumulo costi
         const dist: number[][] = Array(this.height).fill(0).map(() => Array(this.width).fill(Infinity));
-        // Matrice per ricostruire il percorso (da dove vengo?)
         const parent: number[][] = Array(this.height).fill(0).map(() => Array(this.width).fill(0));
 
-        // Inizializzazione prima riga (solo dentro la ROI)
+        // Inizializzazione prima riga
         for (let x = roiStart; x <= roiEnd; x++) {
             if (x >= 0 && x < this.width) {
+                // Se la maschera blocca l'inizio, è infinito
                 dist[0][x] = energyMap[0][x];
             }
         }
 
-        // Calcolo percorso minimo (Dijkstra semplificato per griglia DAG)
+        // DP
         for (let y = 0; y < this.height - 1; y++) {
-            for (let x = roiStart; x <= roiEnd; x++) { // Restiamo nella ROI tollerata
+            for (let x = roiStart; x <= roiEnd; x++) {
                 if (dist[y][x] === Infinity) continue;
 
-                // Controlla i 3 vicini sotto: giù-sinistra, giù, giù-destra
                 const neighbors = [x - 1, x, x + 1];
-
                 for (const nx of neighbors) {
                     if (nx >= roiStart && nx <= roiEnd && nx >= 0 && nx < this.width) {
-                        const newCost = dist[y][x] + energyMap[y + 1][nx];
+                        const cost = energyMap[y + 1][nx];
+                        if (cost === Infinity) continue; // Non camminare su lava
+
+                        const newCost = dist[y][x] + cost;
                         if (newCost < dist[y + 1][nx]) {
                             dist[y + 1][nx] = newCost;
-                            parent[y + 1][nx] = x; // Mi salvo da quale X vengo
+                            parent[y + 1][nx] = x;
                         }
                     }
                 }
             }
         }
 
-        // 3. Backtracking: Trova il punto finale con costo minore e risali
+        // Backtracking
         let minCost = Infinity;
         let endX = -1;
+        
+        // Cerchiamo l'uscita migliore
         for (let x = roiStart; x <= roiEnd; x++) {
             if (dist[this.height - 1][x] < minCost) {
                 minCost = dist[this.height - 1][x];
@@ -86,49 +87,21 @@ export class SeamFinder {
             }
         }
 
-        // Ricostruisci il percorso
-        const path: Point[] = [];
+        if (endX === -1) {
+            // Fallback: Se l'utente ha disegnato un percorso impossibile (interrotto), 
+            // restituisci una linea retta al centro della ROI per non crashare.
+            console.warn("⚠️ Percorso impossibile nella guida. Uso linea retta fallback.");
+            const mid = Math.floor((roiStart + roiEnd) / 2);
+            return Array(this.height).fill(0).map((_, y) => ({ x: mid, y }));
+        }
+
+        const path: {x: number, y: number}[] = [];
         let currX = endX;
         for (let y = this.height - 1; y >= 0; y--) {
             path.push({ x: currX, y });
             currX = parent[y][currX];
         }
 
-        return path.reverse(); // Ordina dall'alto al basso
+        return path.reverse();
     }
 }
-
-// --- ESEMPIO DI ESECUZIONE ---
-
-// Creiamo una mappa 10x10.
-// Immagina che i valori siano altezze in mm (o luminosità 0-255).
-// Creiamo una "cresta" diagonale (bordo netto) che l'algoritmo dovrebbe seguire.
-const mappaTest = [
-    [10, 10, 10, 10, 50, 10, 10, 10, 10, 10], // La cresta inizia a X=4
-    [10, 10, 10, 10, 10, 50, 10, 10, 10, 10], // Si sposta a X=5
-    [10, 10, 10, 10, 10, 50, 10, 10, 10, 10],
-    [10, 10, 10, 10, 10, 10, 50, 10, 10, 10], // Si sposta a X=6
-    [10, 10, 10, 10, 10, 10, 50, 10, 10, 10],
-    [10, 10, 10, 10, 10, 10, 10, 50, 10, 10], // Si sposta a X=7
-    [10, 10, 10, 10, 10, 10, 10, 50, 10, 10],
-    [10, 10, 10, 10, 10, 10, 10, 10, 50, 10], // Si sposta a X=8
-    [10, 10, 10, 10, 10, 10, 10, 10, 50, 10],
-    [10, 10, 10, 10, 10, 10, 10, 10, 50, 10],
-];
-
-const slicer = new SeamFinder(mappaTest);
-// Chiediamo di tagliare tra x=2 e x=8 (ROI)
-const taglio = slicer.findVerticalSeam(2, 8); 
-
-console.log("--- Mappa Altezze (Il 50 rappresenta un bordo netto) ---");
-console.log(mappaTest.map(r => r.join("\t")).join("\n"));
-
-console.log("\n--- Percorso di Taglio Calcolato (X, Y) ---");
-// Visualizzazione ASCII
-const visual = mappaTest.map((row, y) => row.map((val, x) => {
-    const isPath = taglio.find(p => p.x === x && p.y === y);
-    return isPath ? "||" : "..";
-}).join("  "));
-
-console.log(visual);
-console.log("\nCoordinate:", taglio.map(p => `[${p.x},${p.y}]`).join(" -> "));

@@ -13,13 +13,17 @@
     "test-algo": "ts-node src/prototypes/test-seam.ts"
   },
   "dependencies": {
+    "canvas": "^3.2.1",
     "commander": "^11.0.0",
     "manifold-3d": "^2.5.1",
+    "path2d": "^0.3.1",
     "sharp": "^0.32.0",
+    "svg-parser": "^2.0.4",
     "xmlbuilder2": "^3.1.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "@types/svg-parser": "^2.0.6",
     "ts-node": "^10.9.0",
     "typescript": "^5.0.0"
   }
