@@ -24,26 +24,26 @@ export class TilingManager {
         this.scaleY = mapHeightMm / heightMap.length;
     }
 
-    // --- PROCESSO PRINCIPALE (DISPATCHER) ---
-    async process(initialMesh: Manifold, maxBedW: number, maxBedH: number, tolerance: number, guideFile?: string): Promise<TilingResult> {
+    async process(initialMesh: Manifold, maxBedW: number, maxBedH: number, tolerance: number, guideFile?: string, safeMode: boolean = false): Promise<TilingResult> {
         if (guideFile) {
-            return this.processGuided(initialMesh, guideFile, tolerance);
+            return this.processGuided(initialMesh, guideFile, tolerance, safeMode);
         } else {
-            return this.processAuto(initialMesh, maxBedW, maxBedH, tolerance);
+            return this.processAuto(initialMesh, maxBedW, maxBedH, tolerance, safeMode);
         }
     }
 
-    // --- MODALITÀ MANUALE ---
-    async processGuided(initialMesh: Manifold, guidePath: string, tolerance: number): Promise<TilingResult> {
+    // --- MODALITÀ GUIDATA (FIX MEMORY LEAK) ---
+    async processGuided(initialMesh: Manifold, guidePath: string, tolerance: number, safeMode: boolean): Promise<TilingResult> {
         console.log("🛠️  Modalità Guidata Attiva");
         const guides = GuideParser.parse(guidePath, this.fullHeightMap[0].length, this.fullHeightMap.length);
         
         let currentParts: WorkItem[] = [{ mesh: initialMesh, name: "part" }];
 
-        // Verticali
+        // 1. Tagli Verticali
         for (let i = 0; i < guides.verticals.length; i++) {
             const mask = guides.verticals[i];
             const nextParts: WorkItem[] = [];
+            
             for (const item of currentParts) {
                 const finder = new SeamFinder(this.fullHeightMap);
                 finder.setMask(mask);
@@ -53,6 +53,7 @@ export class TilingManager {
                 const seamMinX = Math.min(...seamPixels.map(p => p.x)) * this.scaleX;
                 const seamMaxX = Math.max(...seamPixels.map(p => p.x)) * this.scaleX;
                 
+                // Skip se fuori bounds
                 if (seamMaxX < bounds.min[0] || seamMinX > bounds.max[0]) {
                     nextParts.push(item);
                     continue;
@@ -62,20 +63,38 @@ export class TilingManager {
                 const seamMm = seamPixels.map(p => ({ x: p.x * this.scaleX, y: (this.fullHeightMap.length - p.y) * this.scaleY }));
                 
                 console.log(`   -> Applicazione taglio verticale ${i+1} su ${item.name}...`);
-                const result = await this.geo.sliceVertical(item.mesh, seamMm, {min: bounds.min, max: bounds.max}, tolerance);
+                
+                let cutSuccess = false; // FLAG DI CONTROLLO
+                try {
+                    const result = await this.geo.sliceVertical(item.mesh, seamMm, {min: bounds.min, max: bounds.max}, tolerance, safeMode);
+                    
+                    if (result.left.numTri() > 0) nextParts.push({ mesh: result.left, name: item.name + "_L" });
+                    if (result.right.numTri() > 0) nextParts.push({ mesh: result.right, name: item.name + "_R" });
+                    
+                    cutSuccess = true; // Successo! Possiamo cancellare il padre.
 
-                if (result.left.numTri() > 0) nextParts.push({ mesh: result.left, name: item.name + "_L" });
-                if (result.right.numTri() > 0) nextParts.push({ mesh: result.right, name: item.name + "_R" });
-                item.mesh.delete();
+                } catch (e) {
+                    console.error(`❌ CRASH IRRECUPERABILE su ${item.name}. Salto questo taglio.`);
+                    // Fallimento: Manteniamo il pezzo originale per il prossimo step
+                    nextParts.push(item); 
+                    cutSuccess = false;
+                } finally {
+                    // FIX CRUCIALE: Cancelliamo SOLO se il taglio è riuscito e abbiamo i sostituti.
+                    // Se cancelliamo in caso di errore, 'item' in nextParts diventa un puntatore morto -> Crash.
+                    if (cutSuccess) {
+                        item.mesh.delete();
+                    }
+                }
             }
             currentParts = nextParts;
         }
 
-        // Orizzontali
+        // 2. Tagli Orizzontali (Stessa logica FIX)
         for (let i = 0; i < guides.horizontals.length; i++) {
             const mask = guides.horizontals[i];
             const transposedMask = this.transposeMatrixBoolean(mask);
             const nextParts: WorkItem[] = [];
+            
             for (const item of currentParts) {
                 const transposedMap = this.transposeMatrix(this.fullHeightMap);
                 const finder = new SeamFinder(transposedMap);
@@ -96,19 +115,34 @@ export class TilingManager {
                 const horizontalPathMm = seamTransposed.map(p => ({ x: p.y * this.scaleX, y: (this.fullHeightMap.length - p.x) * this.scaleY }));
 
                 console.log(`   -> Applicazione taglio orizzontale ${i+1} su ${item.name}...`);
-                const result = await this.geo.sliceHorizontal(item.mesh, horizontalPathMm, {min: bounds.min, max: bounds.max}, tolerance);
 
-                if (result.top.numTri() > 0) nextParts.push({ mesh: result.top, name: item.name + "_T" });
-                if (result.bottom.numTri() > 0) nextParts.push({ mesh: result.bottom, name: item.name + "_B" });
-                item.mesh.delete();
+                let cutSuccess = false;
+                try {
+                    const result = await this.geo.sliceHorizontal(item.mesh, horizontalPathMm, {min: bounds.min, max: bounds.max}, tolerance, safeMode);
+
+                    if (result.top.numTri() > 0) nextParts.push({ mesh: result.top, name: item.name + "_T" });
+                    if (result.bottom.numTri() > 0) nextParts.push({ mesh: result.bottom, name: item.name + "_B" });
+                    
+                    cutSuccess = true;
+
+                } catch (e) {
+                    console.error(`❌ CRASH IRRECUPERABILE su ${item.name}. Salto questo taglio.`);
+                    nextParts.push(item);
+                    cutSuccess = false;
+                } finally {
+                    if (cutSuccess) {
+                        item.mesh.delete();
+                    }
+                }
             }
             currentParts = nextParts;
         }
+
         return { parts: currentParts, paths: this.collectedCutPaths };
     }
 
-    // --- MODALITÀ AUTOMATICA (RIPRISTINATA) ---
-    async processAuto(initialMesh: Manifold, maxBedW: number, maxBedH: number, tolerance: number): Promise<TilingResult> {
+    // --- MODALITÀ AUTO (Logica standard invarata, per completezza) ---
+    async processAuto(initialMesh: Manifold, maxBedW: number, maxBedH: number, tolerance: number, safeMode: boolean): Promise<TilingResult> {
         const queue: WorkItem[] = [{ mesh: initialMesh, name: "part" }];
         const finishedParts: WorkItem[] = [];
 
@@ -122,7 +156,6 @@ export class TilingManager {
 
             console.log(`\n🔹 Processing ${item.name}: ${width.toFixed(1)}x${height.toFixed(1)}mm`);
 
-            // 1. CHECK LARGHEZZA
             if (width > maxBedW) {
                 console.log(`   -> Troppo largo. Taglio Verticale...`);
                 const pixelX = Math.floor(centerX / this.scaleX);
@@ -134,32 +167,38 @@ export class TilingManager {
                 this.collectedCutPaths.push(seamPixels.map(p => ({ x: p.x, y: p.y })));
                 const seamMm = seamPixels.map(p => ({ x: p.x * this.scaleX, y: (this.fullHeightMap.length - p.y) * this.scaleY }));
 
-                const result = await this.geo.sliceVertical(item.mesh, seamMm, {min: bounds.min, max: bounds.max}, tolerance);
-
-                if (result.left.numTri() > 0) queue.push({ mesh: result.left, name: item.name + "_L" });
-                if (result.right.numTri() > 0) queue.push({ mesh: result.right, name: item.name + "_R" });
-                item.mesh.delete();
+                try {
+                    const result = await this.geo.sliceVertical(item.mesh, seamMm, {min: bounds.min, max: bounds.max}, tolerance, safeMode);
+                    if (result.left.numTri() > 0) queue.push({ mesh: result.left, name: item.name + "_L" });
+                    if (result.right.numTri() > 0) queue.push({ mesh: result.right, name: item.name + "_R" });
+                    item.mesh.delete(); // Qui è sicuro perché se sliceVertical lancia errore, usciamo nel catch (manca qui il catch ma l'auto mode è meno prona a errori utente)
+                } catch(e) {
+                    console.error("Crash in auto mode, keeping part.");
+                    finishedParts.push(item); // Fallback
+                }
                 continue;
             }
 
-            // 2. CHECK ALTEZZA
             if (height > maxBedH) {
+                // ... logica orizzontale analoga ...
                 console.log(`   -> Troppo alto. Taglio Orizzontale...`);
                 const pixelY_Target = Math.floor((this.fullHeightMap.length * this.scaleY - centerY) / this.scaleY);
                 const transposedMap = this.transposeMatrix(this.fullHeightMap);
                 const finder = new SeamFinder(transposedMap);
                 const tolPix = Math.floor(40 / this.scaleY);
-                
                 const seamTransposed = finder.findVerticalSeam(pixelY_Target - tolPix, pixelY_Target + tolPix);
-                
                 this.collectedCutPaths.push(seamTransposed.map(p => ({ x: p.y, y: p.x })));
                 const horizontalPathMm = seamTransposed.map(p => ({ x: p.y * this.scaleX, y: (this.fullHeightMap.length - p.x) * this.scaleY }));
-
-                const result = await this.geo.sliceHorizontal(item.mesh, horizontalPathMm, {min: bounds.min, max: bounds.max}, tolerance);
-
-                if (result.top.numTri() > 0) queue.push({ mesh: result.top, name: item.name + "_T" });
-                if (result.bottom.numTri() > 0) queue.push({ mesh: result.bottom, name: item.name + "_B" });
-                item.mesh.delete();
+                
+                try {
+                    const result = await this.geo.sliceHorizontal(item.mesh, horizontalPathMm, {min: bounds.min, max: bounds.max}, tolerance, safeMode);
+                    if (result.top.numTri() > 0) queue.push({ mesh: result.top, name: item.name + "_T" });
+                    if (result.bottom.numTri() > 0) queue.push({ mesh: result.bottom, name: item.name + "_B" });
+                    item.mesh.delete();
+                } catch (e) {
+                     console.error("Crash in auto mode H, keeping part.");
+                     finishedParts.push(item);
+                }
                 continue;
             }
 

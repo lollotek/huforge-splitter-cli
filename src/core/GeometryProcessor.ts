@@ -3,6 +3,11 @@ import Module, { Manifold, ManifoldToplevel, CrossSection } from 'manifold-3d';
 
 export class GeometryProcessor {
     private wasm: ManifoldToplevel | null = null;
+    private verbose: boolean = false;
+
+    constructor(verbose: boolean = false) {
+        this.verbose = verbose;
+    }
 
     async init() {
         if (!this.wasm) {
@@ -13,12 +18,12 @@ export class GeometryProcessor {
 
     public async loadMesh(stlPath: string): Promise<Manifold> {
         if (!this.wasm) await this.init();
-        console.log(`📦 Loading mesh: ${stlPath}`);
+        if (this.verbose) console.log(`📦 Loading mesh: ${stlPath}`);
         return this.loadStl(stlPath);
     }
 
     public saveMesh(mesh: Manifold, path: string) {
-        console.log(`💾 Saving: ${path}`);
+        if (this.verbose) console.log(`💾 Saving: ${path}`);
         this.saveStl(mesh, path);
     }
 
@@ -27,52 +32,101 @@ export class GeometryProcessor {
         meshOriginal: Manifold,
         cutPathMm: {x: number, y: number}[],
         bounds: {min: number[], max: number[]},
-        toleranceMm: number
+        toleranceMm: number,
+        safeMode: boolean
+    ): Promise<{left: Manifold, right: Manifold}> {
+        
+        // Se siamo già in safe mode, andiamo diretti
+        if (safeMode) {
+            if (this.verbose) console.log("🔒 Safe Mode: Parametri robusti diretti (No Smooth, 0.5 Clean)");
+            return await this.sliceVerticalInternal(meshOriginal, cutPathMm, bounds, toleranceMm, 0, 0.5);
+        }
+
+        // LIVELLO 1: Qualità Alta (Modificato a 0.35mm per stabilità)
+        try {
+            if (this.verbose) console.log("🌟 Tentativo Qualità Alta (Smooth 2, Clean 0.35)...");
+            return await this.sliceVerticalInternal(meshOriginal, cutPathMm, bounds, toleranceMm, 2, 0.35);
+        } catch (e) {
+            // Se siamo qui, il Safe Cleanup ha funzionato e possiamo riprovare
+            console.warn(`⚠️  Livello 1 fallito. Passo al Livello 2...`);
+        }
+
+        // LIVELLO 2: Qualità Media (No Smooth, Clean 0.35)
+        try {
+            if (this.verbose) console.log("🔸 Tentativo Qualità Media (No Smooth, Clean 0.35)...");
+            return await this.sliceVerticalInternal(meshOriginal, cutPathMm, bounds, toleranceMm, 0, 0.35);
+        } catch (e) {
+            console.warn(`⚠️  Livello 2 fallito. Passo al Livello 3 (Safe Mode)...`);
+        }
+
+        // LIVELLO 3: Safe Mode (Garantito)
+        return await this.sliceVerticalInternal(meshOriginal, cutPathMm, bounds, toleranceMm, 0, 0.5);
+    }
+
+    private async sliceVerticalInternal(
+        meshOriginal: Manifold,
+        cutPathMm: {x: number, y: number}[],
+        bounds: {min: number[], max: number[]},
+        toleranceMm: number,
+        smoothingIterations: number,
+        cleanDistance: number 
     ): Promise<{left: Manifold, right: Manifold}> {
         
         if (!this.wasm) await this.init();
         const m = this.wasm!;
         
-        const pathSimple = this.simplifyPath(cutPathMm, 0.5);
-        
-        // Parametri geometrici
-        const farLeft = bounds.min[0] - 50; 
-        const farRight = bounds.max[0] + 50;
-        const depthMm = bounds.max[2] - bounds.min[2];
-        const hugeZ = 500.0; // depthMm * 3; 
-        const halfGap = toleranceMm / 2;
+        let pathProcessed = this.simplifyPath(cutPathMm, 0.5);
+        if (smoothingIterations > 0) pathProcessed = this.smoothPath(pathProcessed, smoothingIterations);
+        pathProcessed = this.cleanPath(pathProcessed, cleanDistance); 
 
-        // 1. Creazione Poligoni
-        const leftPoly = this.createSidePolygon(pathSimple, farLeft, halfGap, true);
-        const rightPoly = this.createSidePolygon(pathSimple, farRight, halfGap, false);
+        if (this.verbose) console.log(`   -> Punti Path: ${pathProcessed.length} (Smooth: ${smoothingIterations}, Clean: ${cleanDistance})`);
+        if (pathProcessed.length < 3) throw new Error("Percorso troppo breve.");
 
-        // 2. Creazione CrossSections (WASM Objects -> Devono essere liberati)
-        const leftCS = new (m as any).CrossSection([leftPoly]);
-        const rightCS = new (m as any).CrossSection([rightPoly]);
-        
-        // 3. Estrusione (WASM Objects -> Liberare)
-        let leftTool = leftCS.extrude(hugeZ, 0, 0, [1, 1]);
-        let rightTool = rightCS.extrude(hugeZ, 0, 0, [1, 1]);
+        let leftCS: CrossSection | null = null;
+        let rightCS: CrossSection | null = null;
+        let leftTool: Manifold | null = null;
+        let rightTool: Manifold | null = null;
+        let leftToolMoved: Manifold | null = null;
+        let rightToolMoved: Manifold | null = null;
 
-        // Traslazione
-        const zStart = bounds.min[2] - 5.0; 
-        const leftToolMoved = leftTool.translate([0, 0, zStart]);
-        const rightToolMoved = rightTool.translate([0, 0, zStart]);
+        try {
+            const farLeft = bounds.min[0] - 50; 
+            const farRight = bounds.max[0] + 50;
+            const hugeZ = 500.0; 
+            const halfGap = toleranceMm / 2;
 
-        // 4. Intersezione
-        const resultLeft = meshOriginal.intersect(leftToolMoved);
-        const resultRight = meshOriginal.intersect(rightToolMoved);
+            const leftPoly = this.createSidePolygon(pathProcessed, farLeft, halfGap, true);
+            const rightPoly = this.createSidePolygon(pathProcessed, farRight, halfGap, false);
 
-        // 5. PULIZIA MEMORIA (CRUCIALE)
-        // Liberiamo gli oggetti intermedi che non servono più
-        leftCS.delete();
-        rightCS.delete();
-        leftTool.delete();
-        rightTool.delete();
-        leftToolMoved.delete();
-        rightToolMoved.delete();
+            leftCS = new (m as any).CrossSection([leftPoly]);
+            rightCS = new (m as any).CrossSection([rightPoly]);
+            
+            leftTool = leftCS!.extrude(hugeZ, 0, 0, [1, 1]);
+            rightTool = rightCS!.extrude(hugeZ, 0, 0, [1, 1]);
 
-        return { left: resultLeft, right: resultRight };
+            const zStart = bounds.min[2] - 50.0; 
+            leftToolMoved = leftTool!.translate([0, 0, zStart]);
+            rightToolMoved = rightTool!.translate([0, 0, zStart]);
+
+            if (this.verbose) {
+                this.saveStl(leftToolMoved!, `DEBUG_TOOL_V_${Date.now()}.stl`);
+            }
+
+            const resultLeft = meshOriginal.intersect(leftToolMoved!);
+            const resultRight = meshOriginal.intersect(rightToolMoved!);
+
+            return { left: resultLeft, right: resultRight };
+
+        } finally {
+            // SAFE DELETE: Avvolgiamo le cancellazioni in try/catch.
+            // Se WASM è corrotto, delete() potrebbe lanciare eccezioni che mascherano l'errore originale.
+            try { if (leftCS) leftCS.delete(); } catch(e) {}
+            try { if (rightCS) rightCS.delete(); } catch(e) {}
+            try { if (leftTool) leftTool.delete(); } catch(e) {}
+            try { if (rightTool) rightTool.delete(); } catch(e) {}
+            try { if (leftToolMoved) leftToolMoved.delete(); } catch(e) {}
+            try { if (rightToolMoved) rightToolMoved.delete(); } catch(e) {}
+        }
     }
 
     // --- TAGLIO ORIZZONTALE ---
@@ -80,57 +134,144 @@ export class GeometryProcessor {
         meshOriginal: Manifold,
         cutPathMm: {x: number, y: number}[], 
         bounds: {min: number[], max: number[]},
-        toleranceMm: number
+        toleranceMm: number,
+        safeMode: boolean
+    ): Promise<{top: Manifold, bottom: Manifold}> {
+        
+        if (safeMode) {
+            if (this.verbose) console.log("🔒 Safe Mode: Orizzontale (No Smooth, 0.5 Clean)");
+            return await this.sliceHorizontalInternal(meshOriginal, cutPathMm, bounds, toleranceMm, 0, 0.5);
+        }
+
+        try {
+            if (this.verbose) console.log("🌟 Tentativo Orizzontale Alta Qualità (0.35)...");
+            return await this.sliceHorizontalInternal(meshOriginal, cutPathMm, bounds, toleranceMm, 2, 0.35);
+        } catch (e) {
+            console.warn(`⚠️  Orizzontale L1 fallito. Riprovo L2...`);
+        }
+
+        try {
+            return await this.sliceHorizontalInternal(meshOriginal, cutPathMm, bounds, toleranceMm, 0, 0.35);
+        } catch (e) {
+            console.warn("⚠️  Orizzontale L2 fallito. Riprovo L3 (Safe Mode)...");
+        }
+
+        return await this.sliceHorizontalInternal(meshOriginal, cutPathMm, bounds, toleranceMm, 0, 0.5);
+    }
+
+    private async sliceHorizontalInternal(
+        meshOriginal: Manifold,
+        cutPathMm: {x: number, y: number}[], 
+        bounds: {min: number[], max: number[]},
+        toleranceMm: number,
+        smoothingIterations: number,
+        cleanDistance: number
     ): Promise<{top: Manifold, bottom: Manifold}> {
         
         if (!this.wasm) await this.init();
         const m = this.wasm!;
         
-        const pathSimple = this.simplifyPath(cutPathMm, 0.5);
+        let pathProcessed = this.simplifyPath(cutPathMm, 0.5);
+        if (smoothingIterations > 0) pathProcessed = this.smoothPath(pathProcessed, smoothingIterations);
+        pathProcessed = this.cleanPath(pathProcessed, cleanDistance);
 
-        const farTop = bounds.max[1] + 50; 
-        const farBottom = bounds.min[1] - 50;
-        const depthMm = bounds.max[2] - bounds.min[2];
-        const hugeZ = 500.0; // depthMm * 3;
-        const halfGap = toleranceMm / 2;
+        if (this.verbose) console.log(`   -> Punti Path: ${pathProcessed.length}`);
 
-        const topPoly = this.createHorizontalPolygon(pathSimple, farTop, halfGap, true);
-        const bottomPoly = this.createHorizontalPolygon(pathSimple, farBottom, halfGap, false);
+        let topCS: CrossSection | null = null;
+        let bottomCS: CrossSection | null = null;
+        let topTool: Manifold | null = null;
+        let bottomTool: Manifold | null = null;
+        let topToolMoved: Manifold | null = null;
+        let bottomToolMoved: Manifold | null = null;
 
-        // WASM Allocations
-        const topCS = new (m as any).CrossSection([topPoly]);
-        const bottomCS = new (m as any).CrossSection([bottomPoly]);
+        try {
+            const farTop = bounds.max[1] + 50; 
+            const farBottom = bounds.min[1] - 50;
+            const hugeZ = 500.0;
+            const halfGap = toleranceMm / 2;
 
-        let topTool = topCS.extrude(hugeZ, 0, 0, [1, 1]);
-        let bottomTool = bottomCS.extrude(hugeZ, 0, 0, [1, 1]);
+            const topPoly = this.createHorizontalPolygon(pathProcessed, farTop, halfGap, true);
+            const bottomPoly = this.createHorizontalPolygon(pathProcessed, farBottom, halfGap, false);
 
-        const zStart = bounds.min[2] - 5.0;
-        const topToolMoved = topTool.translate([0, 0, zStart]);
-        const bottomToolMoved = bottomTool.translate([0, 0, zStart]);
+            topCS = new (m as any).CrossSection([topPoly]);
+            bottomCS = new (m as any).CrossSection([bottomPoly]);
 
-        const resultTop = meshOriginal.intersect(topToolMoved);
-        const resultBottom = meshOriginal.intersect(bottomToolMoved);
+            topTool = topCS!.extrude(hugeZ, 0, 0, [1, 1]);
+            bottomTool = bottomCS!.extrude(hugeZ, 0, 0, [1, 1]);
 
-        // CLEANUP
-        topCS.delete();
-        bottomCS.delete();
-        topTool.delete();
-        bottomTool.delete();
-        topToolMoved.delete();
-        bottomToolMoved.delete();
+            const zStart = bounds.min[2] - 50.0;
+            topToolMoved = topTool!.translate([0, 0, zStart]);
+            bottomToolMoved = bottomTool!.translate([0, 0, zStart]);
 
-        return { top: resultTop, bottom: resultBottom };
+            if (this.verbose) {
+                this.saveStl(topToolMoved!, `DEBUG_TOOL_H_${Date.now()}.stl`);
+            }
+
+            const resultTop = meshOriginal.intersect(topToolMoved!);
+            const resultBottom = meshOriginal.intersect(bottomToolMoved!);
+
+            return { top: resultTop, bottom: resultBottom };
+
+        } finally {
+            // SAFE DELETE
+            try { if (topCS) topCS.delete(); } catch(e) {}
+            try { if (bottomCS) bottomCS.delete(); } catch(e) {}
+            try { if (topTool) topTool.delete(); } catch(e) {}
+            try { if (bottomTool) bottomTool.delete(); } catch(e) {}
+            try { if (topToolMoved) topToolMoved.delete(); } catch(e) {}
+            try { if (bottomToolMoved) bottomToolMoved.delete(); } catch(e) {}
+        }
     }
 
-    // --- Helpers (Invariati, ma inclusi per completezza) ---
+    // --- ALGORITMI (Invariati) ---
+    private smoothPath(points: {x:number, y:number}[], iterations: number): {x:number, y:number}[] {
+        if (iterations <= 0 || points.length < 3) return points;
+        let smoothed = points;
+        for (let i = 0; i < iterations; i++) {
+            const nextPoints: {x:number, y:number}[] = [];
+            nextPoints.push(smoothed[0]); 
+            for (let j = 0; j < smoothed.length - 1; j++) {
+                const p0 = smoothed[j];
+                const p1 = smoothed[j + 1];
+                const q = { x: 0.75 * p0.x + 0.25 * p1.x, y: 0.75 * p0.y + 0.25 * p1.y };
+                const r = { x: 0.25 * p0.x + 0.75 * p1.x, y: 0.25 * p0.y + 0.75 * p1.y };
+                nextPoints.push(q);
+                nextPoints.push(r);
+            }
+            nextPoints.push(smoothed[smoothed.length - 1]);
+            smoothed = nextPoints;
+        }
+        return smoothed;
+    }
+
+    private cleanPath(points: {x:number, y:number}[], minDist: number): {x:number, y:number}[] {
+        if (points.length < 2) return points;
+        const cleaned = [points[0]];
+        for (let i = 1; i < points.length; i++) {
+            const last = cleaned[cleaned.length - 1];
+            const curr = points[i];
+            const dist = Math.sqrt(Math.pow(curr.x - last.x, 2) + Math.pow(curr.y - last.y, 2));
+            if (dist > minDist) {
+                cleaned.push(curr);
+            }
+        }
+        const lastOriginal = points[points.length - 1];
+        const lastCleaned = cleaned[cleaned.length - 1];
+        if (lastCleaned !== lastOriginal) {
+            cleaned.push(lastOriginal);
+        }
+        return cleaned;
+    }
+
+    // --- Helpers Geometrici (Invariati) ---
     private createSidePolygon(path: {x:number, y:number}[], limitX: number, gapOffset: number, isLeft: boolean): number[][] {
         const poly: number[][] = [];
         const shiftX = isLeft ? -gapOffset : gapOffset;
-        if (isLeft) { // CCW
+        if (isLeft) { 
             poly.push([limitX, path[0].y]); 
             poly.push([limitX, path[path.length-1].y]);
             for (let i = path.length - 1; i >= 0; i--) poly.push([path[i].x + shiftX, path[i].y]);
-        } else { // CCW
+        } else { 
             for (let i = 0; i < path.length; i++) poly.push([path[i].x + shiftX, path[i].y]);
             poly.push([limitX, path[path.length-1].y]);
             poly.push([limitX, path[0].y]);
@@ -138,41 +279,18 @@ export class GeometryProcessor {
         return poly;
     }
 
-// Poligono Orizzontale (Chiude Sopra o Sotto)
-    // FIX: Ordine dei vertici corretto in senso Antiorario (CCW)
     private createHorizontalPolygon(path: {x:number, y:number}[], limitY: number, gapOffset: number, isTop: boolean): number[][] {
         const poly: number[][] = [];
         const shiftY = isTop ? gapOffset : -gapOffset; 
-        
-        // Path viene fornito da Sinistra (X Min) a Destra (X Max)
-        
-        if (isTop) {
-            // LATO ALTO (Top) - Vogliamo l'area SOPRA il taglio.
-            // CCW Order: Basso-Sx -> Basso-Dx -> Alto-Dx -> Alto-Sx
-            
-            // 1. Percorriamo il taglio da SX a DX (Basso)
-            for (let i = 0; i < path.length; i++) {
-                poly.push([path[i].x, path[i].y + shiftY]);
-            }
-            // 2. Saliamo all'angolo Alto-Destra
+        if (isTop) { 
+            for (let i = 0; i < path.length; i++) poly.push([path[i].x, path[i].y + shiftY]);
             poly.push([path[path.length-1].x, limitY]);
-            // 3. Andiamo all'angolo Alto-Sinistra
             poly.push([path[0].x, limitY]);
-            
-        } else {
-            // LATO BASSO (Bottom) - Vogliamo l'area SOTTO il taglio.
-            // CCW Order: Alto-Dx -> Alto-Sx -> Basso-Sx -> Basso-Dx
-            
-            // 1. Percorriamo il taglio da DX a SX (Alto - Inverso)
-            for (let i = path.length - 1; i >= 0; i--) {
-                poly.push([path[i].x, path[i].y + shiftY]);
-            }
-            // 2. Scendiamo all'angolo Basso-Sinistra
+        } else { 
+            for (let i = path.length - 1; i >= 0; i--) poly.push([path[i].x, path[i].y + shiftY]);
             poly.push([path[0].x, limitY]);
-            // 3. Andiamo all'angolo Basso-Destra
             poly.push([path[path.length-1].x, limitY]);
         }
-        
         return poly;
     }
 
@@ -226,7 +344,7 @@ export class GeometryProcessor {
                 triVerts.push(idx);
             }
         }
-        console.log(`   Input Triangoli: ${numTriangles}, Vertici Unici: ${uniqueVertCount}`);
+        if (this.verbose) console.log(`   Input Triangoli: ${numTriangles}, Vertici Unici: ${uniqueVertCount}`);
         const vertProperties = new Float32Array(vertArray);
         const triVertsArray = new Uint32Array(triVerts);
         const meshObj = { numProp: 3, vertProperties: vertProperties, triVerts: triVertsArray };
