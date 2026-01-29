@@ -64,7 +64,7 @@ export class HeightMapper {
 
                 // Mappa coordinate mondo -> coordinate griglia
                 const gx = Math.floor((x - minX) / this.RESOLUTION);
-                const gy = Math.floor((y - minY) / this.RESOLUTION);
+                const gy = Math.floor((maxY - y) / this.RESOLUTION);
 
                 // Safe check e Z-Buffer (tieni il punto più alto)
                 if (gy >= 0 && gy < gridH && gx >= 0 && gx < gridW) {
