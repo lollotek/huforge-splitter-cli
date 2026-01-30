@@ -22,6 +22,7 @@ program
     .option('-w, --width <number>', 'Larghezza piatto (mm)', '200')
     .option('-h, --height <number>', 'Altezza piatto (mm)', '200')
     .option('-t, --tolerance <number>', 'Tolleranza/Gap taglio (mm)', '0.2')
+    .option('-r, --resolution <number>', 'Risoluzione HeightMap (mm/pixel), default 0.5', '0.5')
     .option('-p, --preview', 'Genera solo SVG di anteprima')
     .option('-o, --out <path>', 'Cartella di output', 'output')
     .option('-g, --guide <path>', 'File SVG con i percorsi guida')
@@ -42,6 +43,7 @@ async function run(inputFile: string, opts: any) {
     const BED_W = parseFloat(opts.width);
     const BED_H = parseFloat(opts.height);
     const TOLERANCE = parseFloat(opts.tolerance);
+    const RESOLUTION = parseFloat(opts.resolution);
     const PREVIEW_ONLY = opts.preview;
     const OUT_DIR = opts.out;
     const GUIDE_FILE = opts.guide;
@@ -62,20 +64,20 @@ async function run(inputFile: string, opts: any) {
 
     // Branch to Clip mode if enabled (preferred for large meshes)
     if (CLIP_MODE) {
-        await runClipMode(stlPath, GUIDE_FILE, OUT_DIR, PREVIEW_ONLY, VERBOSE, FIX_MANIFOLD, CAP_MODE, REPAIR_ADMESH, REPAIR_MESHLAB);
+        await runClipMode(stlPath, GUIDE_FILE, OUT_DIR, PREVIEW_ONLY, VERBOSE, RESOLUTION, FIX_MANIFOLD, CAP_MODE, REPAIR_ADMESH, REPAIR_MESHLAB);
         return;
     }
 
     // Branch to HeightMap mode if enabled
     if (HEIGHTMAP_MODE) {
-        await runHeightmapMode(stlPath, GUIDE_FILE, OUT_DIR, PREVIEW_ONLY, VERBOSE);
+        await runHeightmapMode(stlPath, GUIDE_FILE, OUT_DIR, PREVIEW_ONLY, VERBOSE, RESOLUTION);
         return;
     }
 
     // 1. HeightMap
     console.log("\n--- FASE 1: Analisi Topologica ---");
-    const mapData = await HeightMapper.stlToGrid(stlPath);
-    const RESOLUTION = 0.5;
+    const mapData = await HeightMapper.stlToGrid(stlPath, RESOLUTION);
+    // const RESOLUTION = 0.5; // override removed
     const widthMm = mapData.width * RESOLUTION;
     const heightMm = mapData.height * RESOLUTION;
 
@@ -90,7 +92,7 @@ async function run(inputFile: string, opts: any) {
 
     // 3. Processo Tiling
     console.log("\n--- FASE 3: Calcolo Tagli ---");
-    const tiler = new TilingManager(geo, mapData.grid, widthMm, heightMm);
+    const tiler = new TilingManager(geo, mapData.grid, mapData.width, mapData.height, widthMm, heightMm);
 
     // Passiamo SAFE_MODE al tiler
     const result = await tiler.process(originalMesh, BED_W, BED_H, TOLERANCE, GUIDE_FILE, SAFE_MODE);
@@ -167,7 +169,8 @@ async function runHeightmapMode(
     guideFile: string | undefined,
     outDir: string,
     previewOnly: boolean,
-    verbose: boolean
+    verbose: boolean,
+    resolution: number
 ) {
     if (!guideFile) {
         console.error("❌ HeightMap mode richiede un file guida (-g)");
@@ -178,10 +181,9 @@ async function runHeightmapMode(
 
     // 1. Genera HeightMap
     console.log("\n--- FASE 1: Generazione HeightMap ---");
-    const mapData = await HeightMapper.stlToGrid(stlPath);
-    const RESOLUTION = 0.5;
-    const widthMm = mapData.width * RESOLUTION;
-    const heightMm = mapData.height * RESOLUTION;
+    const mapData = await HeightMapper.stlToGrid(stlPath, resolution);
+    const widthMm = mapData.width * resolution;
+    const heightMm = mapData.height * resolution;
 
     // 2. Parse Guide SVG per estrarre seam paths
     console.log("\n--- FASE 2: Estrazione Seam Paths ---");
@@ -192,30 +194,40 @@ async function runHeightmapMode(
     const horizontalPaths: { x: number, y: number }[][] = [];
 
     for (const mask of guides.verticals) {
-        const finder = new SeamFinder(mapData.grid);
+        const finder = new SeamFinder(mapData.grid, mapData.width, mapData.height);
         finder.setMask(mask);
         const seamPixels = finder.findVerticalSeam(0, mapData.width - 1);
         // Converti pixel -> mm (Y invertito perché heightmap ha 0=top)
         const seamMm = seamPixels.map(p => ({
-            x: p.x * RESOLUTION,
-            y: p.y * RESOLUTION  // Nota: manteniamo coordinate pixel per le maschere
+            x: p.x * resolution,
+            y: p.y * resolution  // Nota: manteniamo coordinate pixel per le maschere
         }));
         verticalPaths.push(seamMm);
     }
 
     for (const mask of guides.horizontals) {
-        // Per seams orizzontali, trasponiamo griglia e maschera, troviamo seam verticale, poi trasponiamo risultato
-        const transposedGrid = transposeGrid(mapData.grid);
+        // Per seams orizzontali, trasponiamo griglia e maschera
+        // Helper inline per trasporre Float32Array
+        const transposedGrid = new Float32Array(mapData.width * mapData.height);
+        for (let y = 0; y < mapData.height; y++) {
+            for (let x = 0; x < mapData.width; x++) {
+                transposedGrid[x * mapData.height + y] = mapData.grid[y * mapData.width + x];
+            }
+        }
+        const transposedW = mapData.height;
+        const transposedH = mapData.width;
+
+        // Mask transposition logic (number[][]) - wait, mask coming from GuideParser is boolean[][]
         const transposedMask = transposeMask(mask);
 
-        const finder = new SeamFinder(transposedGrid);
+        const finder = new SeamFinder(transposedGrid, transposedW, transposedH);
         finder.setMask(transposedMask);
-        const seamPixels = finder.findVerticalSeam(0, transposedGrid[0].length - 1);
+        const seamPixels = finder.findVerticalSeam(0, transposedW - 1);
 
         // Ri-trasponi le coordinate: (x, y) trasposto -> (y, x) originale
         const seamMm = seamPixels.map((p: { x: number, y: number }) => ({
-            x: p.y * RESOLUTION,  // Era la riga nella griglia trasposta = X originale
-            y: p.x * RESOLUTION   // Era la colonna nella griglia trasposta = Y originale
+            x: p.y * resolution,  // Era la riga nella griglia trasposta = X originale
+            y: p.x * resolution   // Era la colonna nella griglia trasposta = Y originale
         }));
         horizontalPaths.push(seamMm);
     }
@@ -224,8 +236,8 @@ async function runHeightmapMode(
 
     // 3. Genera tiles usando TileGenerator con seed-based flood fill
     console.log("\n--- FASE 3: Generazione Tiles da HeightMap ---");
-    const tileGen = new TileGenerator(mapData.grid, mapData.width, mapData.height, RESOLUTION, verbose);
-    const splitter = new RegionSplitter(mapData.width, mapData.height, RESOLUTION);
+    const tileGen = new TileGenerator(mapData.grid, mapData.width, mapData.height, resolution, verbose);
+    const splitter = new RegionSplitter(mapData.width, mapData.height, resolution);
 
     // Combina tutti i paths per creare barriere
     const allPaths = [...verticalPaths, ...horizontalPaths];
@@ -260,7 +272,15 @@ async function runHeightmapMode(
             const tileGrid = tileGen.extractTileGrid(mask);
 
             if (tileGrid.width > 0 && tileGrid.height > 0) {
-                const stlBuffer = tileGen.gridToSTL(tileGrid.grid, tileGrid.offsetX, tileGrid.offsetY);
+                // UPDATE: Use gridToSTL_Flat
+                const stlBuffer = tileGen.gridToSTL_Flat(
+                    tileGrid.grid,
+                    tileGrid.width,
+                    tileGrid.height,
+                    tileGrid.offsetX,
+                    tileGrid.offsetY,
+                    tileGrid.validMap
+                );
                 tiles.push({ name: `tile_r${row}_c${col}`, buffer: stlBuffer });
             }
         }
@@ -294,6 +314,7 @@ async function runClipMode(
     outDir: string,
     previewOnly: boolean,
     verbose: boolean,
+    resolution: number,
     fixManifold: boolean = false,
     capMode: boolean = false,
     repairAdmesh: boolean = false,
@@ -308,10 +329,9 @@ async function runClipMode(
 
     // 1. Genera HeightMap per trovare seam paths ottimali
     console.log("\n--- FASE 1: Analisi Topologica ---");
-    const mapData = await HeightMapper.stlToGrid(stlPath);
-    const RESOLUTION = 0.5;
-    const widthMm = mapData.width * RESOLUTION;
-    const heightMm = mapData.height * RESOLUTION;
+    const mapData = await HeightMapper.stlToGrid(stlPath, resolution);
+    const widthMm = mapData.width * resolution;
+    const heightMm = mapData.height * resolution;
 
     // Leggi STL per ottenere bounding box COMPLETO
     const stlBuffer = fs.readFileSync(stlPath);
@@ -340,7 +360,7 @@ async function runClipMode(
     const scaleY = heightMm / mapData.height;
 
     for (const mask of guides.verticals) {
-        const finder = new SeamFinder(mapData.grid);
+        const finder = new SeamFinder(mapData.grid, mapData.width, mapData.height);
         finder.setMask(mask);
         const seamPixels = finder.findVerticalSeam(0, mapData.width - 1);
         // Converti pixel -> world coords mm
@@ -358,11 +378,20 @@ async function runClipMode(
     }
 
     for (const mask of guides.horizontals) {
-        const transposedGrid = transposeGrid(mapData.grid);
+        // Transpose HeightMap manually
+        const transposedGrid = new Float32Array(mapData.width * mapData.height);
+        for (let y = 0; y < mapData.height; y++) {
+            for (let x = 0; x < mapData.width; x++) {
+                transposedGrid[x * mapData.height + y] = mapData.grid[y * mapData.width + x];
+            }
+        }
+        const transposedW = mapData.height;
+        const transposedH = mapData.width;
+
         const transposedMask = transposeMask(mask);
-        const finder = new SeamFinder(transposedGrid);
+        const finder = new SeamFinder(transposedGrid, transposedW, transposedH);
         finder.setMask(transposedMask);
-        const seamPixels = finder.findVerticalSeam(0, transposedGrid[0].length - 1);
+        const seamPixels = finder.findVerticalSeam(0, transposedW - 1);
         const seamMm = seamPixels.map((p: { x: number, y: number }) => ({
             x: globalMinX + p.y * scaleX,   // Trasposto
             y: globalMaxY - p.x * scaleY    // Trasposto + invertito

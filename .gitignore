@@ -3,3 +3,5 @@ sample/
 *.stl
 *.svg
 output/
+*.log
+*.3mf

@@ -17,10 +17,6 @@ export class RegionSplitter {
 
   /**
    * Divide la heightmap in regioni usando paths verticali e orizzontali
-   * 
-   * @param verticalPaths Array di paths verticali (in mm) ordinati da sinistra a destra
-   * @param horizontalPaths Array di paths orizzontali (in mm) ordinati dall'alto al basso
-   * @returns Array di regioni, ognuna con i paths che la delimitano e un nome
    */
   splitIntoRegions(
     verticalPaths: { x: number, y: number }[][],
@@ -28,12 +24,9 @@ export class RegionSplitter {
   ): { paths: { x: number, y: number }[][], name: string }[] {
     const regions: { paths: { x: number, y: number }[][], name: string }[] = [];
 
-    // Calcola i "column boundaries" dai paths verticali
-    // Ogni path verticale divide in left/right
     const numCols = verticalPaths.length + 1;
     const numRows = horizontalPaths.length + 1;
 
-    // Per ogni cella della griglia, determina i paths che la delimitano
     for (let row = 0; row < numRows; row++) {
       for (let col = 0; col < numCols; col++) {
         const boundaryPaths: { x: number, y: number }[][] = [];
@@ -42,7 +35,6 @@ export class RegionSplitter {
         if (col > 0) {
           boundaryPaths.push(verticalPaths[col - 1]);
         } else {
-          // Bordo sinistro del modello
           boundaryPaths.push(this.createEdgePath('left'));
         }
 
@@ -50,7 +42,6 @@ export class RegionSplitter {
         if (col < verticalPaths.length) {
           boundaryPaths.push(verticalPaths[col]);
         } else {
-          // Bordo destro del modello
           boundaryPaths.push(this.createEdgePath('right'));
         }
 
@@ -58,7 +49,6 @@ export class RegionSplitter {
         if (row > 0) {
           boundaryPaths.push(horizontalPaths[row - 1]);
         } else {
-          // Bordo superiore del modello
           boundaryPaths.push(this.createEdgePath('top'));
         }
 
@@ -66,13 +56,10 @@ export class RegionSplitter {
         if (row < horizontalPaths.length) {
           boundaryPaths.push(horizontalPaths[row]);
         } else {
-          // Bordo inferiore del modello
           boundaryPaths.push(this.createEdgePath('bottom'));
         }
 
-        // Nome della regione (es: "tile_0_1" per riga 0, colonna 1)
         const name = `tile_r${row}_c${col}`;
-
         regions.push({ paths: boundaryPaths, name });
       }
     }
@@ -80,9 +67,6 @@ export class RegionSplitter {
     return regions;
   }
 
-  /**
-   * Crea un path rettilineo per i bordi del modello
-   */
   private createEdgePath(edge: 'left' | 'right' | 'top' | 'bottom'): { x: number, y: number }[] {
     const widthMm = this.width * this.resolution;
     const heightMm = this.height * this.resolution;
@@ -117,20 +101,17 @@ export class RegionSplitter {
 
   /**
    * Approccio alternativo: crea una maschera usando flood fill con seed point
-   * Invece di usare i paths come confini, piazza un seed point in ogni regione
-   * e fa flood fill fino ai confini
+   * Utilizza Uint8Array (0=false, 1=true) per efficienza memoria
    */
   createRegionMask(
     seedX: number,  // in mm
     seedY: number,  // in mm
     allPaths: { x: number, y: number }[][]
-  ): boolean[][] {
+  ): Uint8Array {
     // Inizializza maschera con i confini
-    const mask: boolean[][] = Array(this.height)
-      .fill(null)
-      .map(() => Array(this.width).fill(false));
+    const mask = new Uint8Array(this.width * this.height).fill(0);
 
-    // Disegna tutti i paths come barriere
+    // Disegna tutti i paths come barriere (valore 2 = confine)
     for (const path of allPaths) {
       this.drawPathOnMask(mask, path);
     }
@@ -141,31 +122,45 @@ export class RegionSplitter {
 
     if (seedPx < 0 || seedPx >= this.width || seedPy < 0 || seedPy >= this.height) {
       console.warn(`⚠️ Seed point (${seedX}, ${seedY}) outside bounds`);
-      return mask;
+      return mask; // Returns boundaries only (basically empty region)
     }
 
     // BFS flood fill
-    const result: boolean[][] = Array(this.height)
-      .fill(null)
-      .map(() => Array(this.width).fill(false));
+    // Usiamo la stessa maschera: 0=vuoto, 1=regione, 2=confine
+    const result = new Uint8Array(this.width * this.height).fill(0);
 
-    const queue: [number, number][] = [[seedPx, seedPy]];
-    result[seedPy][seedPx] = true;
+    const queue: number[] = [seedPy * this.width + seedPx];
+    // Se il seed non è sul confine, partiamo
+    if (mask[seedPy * this.width + seedPx] !== 2) {
+      result[seedPy * this.width + seedPx] = 1;
+    } else {
+      // Se il seed e' sfortunatamente su un confine, proviamo a spostarci leggermente
+      // Ma per ora lasciamo stare, è un edge case.
+      return result;
+    }
 
-    const directions = [[0, 1], [1, 0], [0, -1], [-1, 0]];
+    const directions = [-1, 1, -this.width, this.width]; // Left, Right, Up, Down
 
-    while (queue.length > 0) {
-      const [x, y] = queue.shift()!;
+    let head = 0;
+    while (head < queue.length) {
+      const currIdx = queue[head++];
 
-      for (const [dx, dy] of directions) {
-        const nx = x + dx;
-        const ny = y + dy;
+      const cx = currIdx % this.width;
 
-        if (nx >= 0 && nx < this.width && ny >= 0 && ny < this.height) {
-          // Se non già nella regione e non è un confine
-          if (!result[ny][nx] && !mask[ny][nx]) {
-            result[ny][nx] = true;
-            queue.push([nx, ny]);
+      // Controlla 4 vicini
+      for (const offset of directions) {
+        const nextIdx = currIdx + offset;
+
+        // Check bounds X (per evitare wrap-around)
+        if (offset === -1 && cx === 0) continue;
+        if (offset === 1 && cx === this.width - 1) continue;
+
+        // Check bounds global
+        if (nextIdx >= 0 && nextIdx < result.length) {
+          // Se non visitato (result==0) e non è confine (mask==2)
+          if (result[nextIdx] === 0 && mask[nextIdx] !== 2) {
+            result[nextIdx] = 1;
+            queue.push(nextIdx);
           }
         }
       }
@@ -175,9 +170,10 @@ export class RegionSplitter {
   }
 
   /**
-   * Disegna path sulla maschera usando Bresenham
+   * Disegna path sulla maschera
+   * Valore 2 = Boundary
    */
-  private drawPathOnMask(mask: boolean[][], path: { x: number, y: number }[]) {
+  private drawPathOnMask(mask: Uint8Array, path: { x: number, y: number }[]) {
     for (let i = 0; i < path.length - 1; i++) {
       const p1 = path[i];
       const p2 = path[i + 1];
@@ -191,7 +187,7 @@ export class RegionSplitter {
     }
   }
 
-  private drawLine(mask: boolean[][], x1: number, y1: number, x2: number, y2: number) {
+  private drawLine(mask: Uint8Array, x1: number, y1: number, x2: number, y2: number) {
     const dx = Math.abs(x2 - x1);
     const dy = Math.abs(y2 - y1);
     const sx = x1 < x2 ? 1 : -1;
@@ -203,7 +199,7 @@ export class RegionSplitter {
 
     while (true) {
       if (x >= 0 && x < this.width && y >= 0 && y < this.height) {
-        mask[y][x] = true;
+        mask[y * this.width + x] = 2; // 2 = Bound
       }
 
       if (x === x2 && y === y2) break;

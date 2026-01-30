@@ -1,13 +1,13 @@
 export class SeamFinder {
     private width: number;
     private height: number;
-    private data: number[][]; 
-    private mask: boolean[][] | null = null; // Nuova Maschera Opzionale
+    private data: Float32Array;
+    private mask: Int8Array | null = null; // Flattened mask
 
-    constructor(heightMap: number[][]) {
+    constructor(heightMap: Float32Array, width: number, height: number) {
         this.data = heightMap;
-        this.height = heightMap.length;
-        this.width = heightMap[0].length;
+        this.width = width;
+        this.height = height;
     }
 
     // Permette di caricare una maschera (true = zona permessa, false = zona proibita)
@@ -17,59 +17,77 @@ export class SeamFinder {
             console.warn("⚠️ Warning: Dimensioni maschera diverse dalla mappa. La maschera verrà ignorata.");
             return;
         }
-        this.mask = mask;
-    }
-
-    private calculateEnergyMap(): number[][] {
-        const energyMap: number[][] = Array(this.height).fill(0).map(() => Array(this.width).fill(0));
-
+        this.mask = new Int8Array(this.width * this.height);
         for (let y = 0; y < this.height; y++) {
             for (let x = 0; x < this.width; x++) {
+                this.mask[y * this.width + x] = mask[y][x] ? 1 : 0;
+            }
+        }
+    }
+
+    private calculateEnergyMap(): Float32Array {
+        const energyMap = new Float32Array(this.width * this.height);
+
+        for (let y = 0; y < this.height; y++) {
+            const rowOffset = y * this.width;
+            for (let x = 0; x < this.width; x++) {
+                const idx = rowOffset + x;
+
                 // SE C'È UNA MASCHERA e siamo fuori zona -> Costo Infinito
-                if (this.mask && !this.mask[y][x]) {
-                    energyMap[y][x] = Infinity;
+                if (this.mask && this.mask[idx] === 0) {
+                    energyMap[idx] = Infinity;
                     continue;
                 }
 
-                const rightNeighbor = x < this.width - 1 ? this.data[y][x + 1] : this.data[y][x];
-                const gradient = Math.abs(this.data[y][x] - rightNeighbor);
-                
+                const rightNeighbor = x < this.width - 1 ? this.data[idx + 1] : this.data[idx];
+                const gradient = Math.abs(this.data[idx] - rightNeighbor);
+
                 // Costo standard: Più alto il gradiente (bordo), minore il costo.
-                energyMap[y][x] = 100 / (gradient + 1); 
+                energyMap[idx] = 100.0 / (gradient + 1.0);
             }
         }
         return energyMap;
     }
 
-    public findVerticalSeam(roiStart: number, roiEnd: number): {x: number, y: number}[] {
+    public findVerticalSeam(roiStart: number, roiEnd: number): { x: number, y: number }[] {
         const energyMap = this.calculateEnergyMap();
-        const dist: number[][] = Array(this.height).fill(0).map(() => Array(this.width).fill(Infinity));
-        const parent: number[][] = Array(this.height).fill(0).map(() => Array(this.width).fill(0));
+        const dist = new Float32Array(this.width * this.height).fill(Infinity);
+        const parent = new Int32Array(this.width * this.height).fill(0);
 
         // Inizializzazione prima riga
         for (let x = roiStart; x <= roiEnd; x++) {
             if (x >= 0 && x < this.width) {
                 // Se la maschera blocca l'inizio, è infinito
-                dist[0][x] = energyMap[0][x];
+                dist[x] = energyMap[x];
             }
         }
 
         // DP
         for (let y = 0; y < this.height - 1; y++) {
+            const rowOffset = y * this.width;
+            const nextRowOffset = (y + 1) * this.width;
+
             for (let x = roiStart; x <= roiEnd; x++) {
-                if (dist[y][x] === Infinity) continue;
+                const currIdx = rowOffset + x;
+                if (dist[currIdx] === Infinity) continue;
 
-                const neighbors = [x - 1, x, x + 1];
-                for (const nx of neighbors) {
-                    if (nx >= roiStart && nx <= roiEnd && nx >= 0 && nx < this.width) {
-                        const cost = energyMap[y + 1][nx];
-                        if (cost === Infinity) continue; // Non camminare su lava
+                // neighbors relative to x: -1, 0, +1
+                const startNx = Math.max(0, x - 1);
+                const endNx = Math.min(this.width - 1, x + 1);
 
-                        const newCost = dist[y][x] + cost;
-                        if (newCost < dist[y + 1][nx]) {
-                            dist[y + 1][nx] = newCost;
-                            parent[y + 1][nx] = x;
-                        }
+                for (let nx = startNx; nx <= endNx; nx++) {
+                    // Check logic constraints
+                    if (nx < roiStart || nx > roiEnd) continue;
+
+                    const nextIdx = nextRowOffset + nx;
+                    const cost = energyMap[nextIdx];
+
+                    if (cost === Infinity) continue; // Non camminare su lava
+
+                    const newCost = dist[currIdx] + cost;
+                    if (newCost < dist[nextIdx]) {
+                        dist[nextIdx] = newCost;
+                        parent[nextIdx] = x; // store PARENT x coordinate
                     }
                 }
             }
@@ -78,28 +96,31 @@ export class SeamFinder {
         // Backtracking
         let minCost = Infinity;
         let endX = -1;
-        
+
+        const lastRowOffset = (this.height - 1) * this.width;
+
         // Cerchiamo l'uscita migliore
         for (let x = roiStart; x <= roiEnd; x++) {
-            if (dist[this.height - 1][x] < minCost) {
-                minCost = dist[this.height - 1][x];
+            const idx = lastRowOffset + x;
+            if (dist[idx] < minCost) {
+                minCost = dist[idx];
                 endX = x;
             }
         }
 
         if (endX === -1) {
-            // Fallback: Se l'utente ha disegnato un percorso impossibile (interrotto), 
-            // restituisci una linea retta al centro della ROI per non crashare.
+            // Fallback
             console.warn("⚠️ Percorso impossibile nella guida. Uso linea retta fallback.");
             const mid = Math.floor((roiStart + roiEnd) / 2);
             return Array(this.height).fill(0).map((_, y) => ({ x: mid, y }));
         }
 
-        const path: {x: number, y: number}[] = [];
+        const path: { x: number, y: number }[] = [];
         let currX = endX;
         for (let y = this.height - 1; y >= 0; y--) {
             path.push({ x: currX, y });
-            currX = parent[y][currX];
+            // Look up parent for current pixel
+            currX = parent[y * this.width + currX];
         }
 
         return path.reverse();

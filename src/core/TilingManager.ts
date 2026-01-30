@@ -12,7 +12,9 @@ export type TilingResult = {
 
 export class TilingManager {
     private geo: GeometryProcessor;
-    private fullHeightMap: number[][];
+    private fullHeightMap: Float32Array;
+    private mapWidth: number;
+    private mapHeight: number;
     private scaleX: number;
     private scaleY: number;
     private collectedCutPaths: { x: number, y: number }[][] = [];
@@ -21,11 +23,13 @@ export class TilingManager {
     private globalMinX: number = 0; // Sarà settato nel process o passato
     private globalMaxY: number = 0; // FONDAMENTALE
 
-    constructor(geo: GeometryProcessor, heightMap: number[][], mapWidthMm: number, mapHeightMm: number) {
+    constructor(geo: GeometryProcessor, heightMap: Float32Array, mapWidth: number, mapHeight: number, mapWidthMm: number, mapHeightMm: number) {
         this.geo = geo;
         this.fullHeightMap = heightMap;
-        this.scaleX = mapWidthMm / heightMap[0].length;
-        this.scaleY = mapHeightMm / heightMap.length;
+        this.mapWidth = mapWidth;
+        this.mapHeight = mapHeight;
+        this.scaleX = mapWidthMm / mapWidth;
+        this.scaleY = mapHeightMm / mapHeight;
     }
 
     async process(initialMesh: Manifold, maxBedW: number, maxBedH: number, tolerance: number, guideFile?: string, safeMode: boolean = false): Promise<TilingResult> {
@@ -43,7 +47,7 @@ export class TilingManager {
 
     async processGuided(initialMesh: Manifold, guidePath: string, tolerance: number, safeMode: boolean): Promise<TilingResult> {
         console.log("🛠️  Modalità Guidata Attiva");
-        const guides = GuideParser.parse(guidePath, this.fullHeightMap[0].length, this.fullHeightMap.length);
+        const guides = GuideParser.parse(guidePath, this.mapWidth, this.mapHeight);
 
         let currentParts: WorkItem[] = [{ mesh: initialMesh, name: "part" }];
 
@@ -53,9 +57,9 @@ export class TilingManager {
             const nextParts: WorkItem[] = [];
 
             for (const item of currentParts) {
-                const finder = new SeamFinder(this.fullHeightMap);
+                const finder = new SeamFinder(this.fullHeightMap, this.mapWidth, this.mapHeight);
                 finder.setMask(mask);
-                const seamPixels = finder.findVerticalSeam(0, this.fullHeightMap[0].length - 1);
+                const seamPixels = finder.findVerticalSeam(0, this.mapWidth - 1);
 
                 // Conversione Bounds per check rapido
                 const bounds = item.mesh.boundingBox();
@@ -92,15 +96,12 @@ export class TilingManager {
                     // Estrai info dettagliata dall'errore WASM
                     const errName = e?.name || 'UnknownError';
                     const errMsg = e?.message || String(e);
-                    const errStack = e?.stack?.split('\n')[0] || '';
 
                     console.error(`❌ CRASH su ${item.name}`);
-                    console.error(`   Tipo: ${errName}`);
-                    console.error(`   Messaggio: ${errMsg}`);
+                    console.error(`   Message: ${errMsg}`);
                     if (errName === 'RuntimeError') {
-                        console.error(`   ⚠️  Errore WASM: probabile geometria degenerata o self-intersection`);
+                        console.error(`   ⚠️  Errore WASM: probabile geometria degenerata`);
                     }
-                    console.error(`   Hint: Prova --safe o aumenta -t (tolleranza)`);
                     nextParts.push(item);
                     cutSuccess = false;
                 } finally {
@@ -117,11 +118,20 @@ export class TilingManager {
             const nextParts: WorkItem[] = [];
 
             for (const item of currentParts) {
-                const transposedMap = this.transposeMatrix(this.fullHeightMap);
-                const finder = new SeamFinder(transposedMap);
+                // Transpose HeightMap manually
+                const transposedMap = new Float32Array(this.mapWidth * this.mapHeight);
+                for (let y = 0; y < this.mapHeight; y++) {
+                    for (let x = 0; x < this.mapWidth; x++) {
+                        transposedMap[x * this.mapHeight + y] = this.fullHeightMap[y * this.mapWidth + x];
+                    }
+                }
+                const transposedW = this.mapHeight;
+                const transposedH = this.mapWidth;
+
+                const finder = new SeamFinder(transposedMap, transposedW, transposedH);
                 finder.setMask(transposedMask);
 
-                const seamTransposed = finder.findVerticalSeam(0, transposedMap[0].length - 1);
+                const seamTransposed = finder.findVerticalSeam(0, transposedW - 1);
 
                 // --- FIX COORDINATE PIXEL -> MM ---
                 // In transposed: p.x è Row (Y originale), p.y è Col (X originale)
@@ -154,17 +164,7 @@ export class TilingManager {
                     if (result.bottom.numTri() > 0) nextParts.push({ mesh: result.bottom, name: item.name + "_B" });
                     cutSuccess = true;
                 } catch (e: any) {
-                    // Estrai info dettagliata dall'errore WASM
-                    const errName = e?.name || 'UnknownError';
-                    const errMsg = e?.message || String(e);
-
                     console.error(`❌ CRASH su ${item.name}`);
-                    console.error(`   Tipo: ${errName}`);
-                    console.error(`   Messaggio: ${errMsg}`);
-                    if (errName === 'RuntimeError') {
-                        console.error(`   ⚠️  Errore WASM: probabile geometria degenerata o self-intersection`);
-                    }
-                    console.error(`   Hint: Prova --safe o aumenta -t (tolleranza)`);
                     nextParts.push(item);
                     cutSuccess = false;
                 } finally {
@@ -184,9 +184,6 @@ export class TilingManager {
         return { parts: [], paths: [] }; // Placeholder
     }
 
-    private transposeMatrix(matrix: number[][]): number[][] {
-        return matrix[0].map((_, colIndex) => matrix.map(row => row[colIndex]));
-    }
     private transposeMatrixBoolean(matrix: boolean[][]): boolean[][] {
         return matrix[0].map((_, colIndex) => matrix.map(row => row[colIndex]));
     }
