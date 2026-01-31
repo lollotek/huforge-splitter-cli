@@ -407,27 +407,54 @@ async function runClipMode(
 
     console.log(`   -> ${verticalPaths.length} vertical, ${horizontalPaths.length} horizontal paths`);
 
-    // 3. Clip mesh iterativamente
-    console.log("\n--- FASE 3: Triangle Clipping ---");
-    const clipper = new TriangleClipper(verbose);
+    // 3. Streaming Slicer Phase
+    console.log("\n--- FASE 3: Streaming Slicing (New Architecture) ---");
+    const { StreamingSlicer } = await import('./core/StreamingSlicer');
+    const streamSlicer = new StreamingSlicer(stlPath, outDir, verbose);
 
+    // Assicurati che outDir esista
+    if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
+
+    await streamSlicer.process(verticalPaths, horizontalPaths);
+
+    // 4. Generate SVG Preview
+    if (guideFile && !previewOnly) {
+        const svgPath = path.join(outDir, '_preview_cuts.svg');
+        console.log(`\n--- Generating Preview: ${svgPath} ---`);
+        // SvgBuilder constructor takes (width, height)
+        const builder = new SvgBuilder(widthMm, heightMm);
+
+        verticalPaths.forEach(p => builder.addCutLine(p, 'red'));
+        horizontalPaths.forEach(p => builder.addCutLine(p, 'blue'));
+
+        builder.save(svgPath);
+    }
+
+    // Skip old logic
+    return;
+    /*
+    const clipper = new TriangleClipper(verbose);
+    // ... old clipper logic ...
+    */
+
+    /*
     // Strategia: prima tagli verticali, poi orizzontali su ogni pezzo
     let currentBuffers: { name: string, buffer: Buffer }[] = [
         { name: 'part', buffer: stlBuffer }
     ];
-
+    
     // Tagli verticali
     for (let i = 0; i < verticalPaths.length; i++) {
         const seamPath = verticalPaths[i];
         const nextBuffers: { name: string, buffer: Buffer }[] = [];
-
+    
         for (const item of currentBuffers) {
             const triCount = item.buffer.readUInt32LE(80);
             if (triCount === 0) {
                 nextBuffers.push(item);
                 continue;
             }
-
+    
             // Check se il path interseca questo pezzo
             const bbox = clipper.getBoundingBox(item.buffer);
             if (!clipper.pathIntersectsBboxVertical(seamPath, bbox)) {
@@ -435,34 +462,34 @@ async function runClipMode(
                 nextBuffers.push(item);
                 continue;
             }
-
+    
             console.log(`   Vertical cut ${i + 1} on ${item.name}...`);
             const result = capMode
                 ? clipper.splitSTLWithCaps(item.buffer, seamPath, 'vertical')
                 : clipper.splitSTL(item.buffer, seamPath);
-
+    
             // Solo aggiungi parti non vuote
             const leftCount = result.leftBuffer.readUInt32LE(80);
             const rightCount = result.rightBuffer.readUInt32LE(80);
             if (leftCount > 0) nextBuffers.push({ name: `${item.name}_L`, buffer: result.leftBuffer });
             if (rightCount > 0) nextBuffers.push({ name: `${item.name}_R`, buffer: result.rightBuffer });
         }
-
+    
         currentBuffers = nextBuffers;
     }
-
+    
     // Tagli orizzontali
     for (let i = 0; i < horizontalPaths.length; i++) {
         const seamPath = horizontalPaths[i];
         const nextBuffers: { name: string, buffer: Buffer }[] = [];
-
+    
         for (const item of currentBuffers) {
             const triCount = item.buffer.readUInt32LE(80);
             if (triCount === 0) {
                 nextBuffers.push(item);
                 continue;
             }
-
+    
             // Check se il path interseca questo pezzo
             const bbox = clipper.getBoundingBox(item.buffer);
             if (!clipper.pathIntersectsBboxHorizontal(seamPath, bbox)) {
@@ -470,80 +497,80 @@ async function runClipMode(
                 nextBuffers.push(item);
                 continue;
             }
-
+    
             console.log(`   Horizontal cut ${i + 1} on ${item.name}...`);
             const result = capMode
                 ? clipper.splitSTLWithCaps(item.buffer, seamPath, 'horizontal')
                 : clipper.splitSTLHorizontal(item.buffer, seamPath);
-
+    
             // Solo aggiungi parti non vuote
             const leftCount = result.leftBuffer.readUInt32LE(80);
             const rightCount = result.rightBuffer.readUInt32LE(80);
             if (leftCount > 0) nextBuffers.push({ name: `${item.name}_T`, buffer: result.leftBuffer });
             if (rightCount > 0) nextBuffers.push({ name: `${item.name}_B`, buffer: result.rightBuffer });
         }
-
+    
         currentBuffers = nextBuffers;
     }
-
+    
     console.log(`   -> ${currentBuffers.length} tiles generated`);
-
+    
     // 4. Riparazione Manifold (opzionale)
     if (fixManifold) {
         console.log("\n--- FASE 4: Riparazione Manifold ---");
         const geo = new GeometryProcessor(verbose);
         await geo.init();
-
+    
         const repairedBuffers: { name: string, buffer: Buffer }[] = [];
-
+    
         for (const tile of currentBuffers) {
             const triCount = tile.buffer.readUInt32LE(80);
             if (triCount === 0) continue;
-
+    
             const tempPath = path.join(outDir, `_temp_${tile.name}.stl`);
             const repairedPath = path.join(outDir, `${tile.name}.stl`);
-
+    
             try {
                 console.log(`   🔧 Repairing ${tile.name}...`);
                 // Scrivi file temporaneo
                 if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
                 fs.writeFileSync(tempPath, tile.buffer);
-
+    
                 // Carica in manifold (ripara automaticamente)
                 const mesh = await geo.loadMesh(tempPath);
-
+    
                 // Esporta mesh riparata
                 geo.saveMesh(mesh, repairedPath);
-
+    
                 // Rileggi come buffer
                 const repairedBuffer = fs.readFileSync(repairedPath);
                 const repairedTriCount = repairedBuffer.readUInt32LE(80);
                 repairedBuffers.push({ name: tile.name, buffer: repairedBuffer });
-
+    
                 // Pulisci temp
                 if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
                 mesh.delete();
-
+    
                 console.log(`   ✅ ${tile.name}: ${triCount} → ${repairedTriCount} triangles`);
             } catch (e: any) {
                 console.log(`   ⚠️ ${tile.name}: Manifold repair failed, keeping original`);
                 if (verbose) console.error(`      Error: ${e?.message || e}`);
-
+    
                 // Pulisci temp file se esiste
                 if (fs.existsSync(tempPath)) {
                     try { fs.unlinkSync(tempPath); } catch { }
                 }
-
+    
                 // Fallback: usa buffer originale ma salvalo direttamente
                 fs.writeFileSync(repairedPath, tile.buffer);
                 repairedBuffers.push({ name: tile.name, buffer: tile.buffer });
             }
         }
-
+    
         currentBuffers = repairedBuffers;
         console.log(`   -> ${currentBuffers.length} tiles processed`);
     }
-
+    
     // 5. Salvataggio
     console.log("\n--- FASE 5: Salvataggio ---");
     const savedPaths: string[] = [];
@@ -564,21 +591,21 @@ async function runClipMode(
     } else {
         console.log("⚠️  Modalità Preview: File STL non salvati.");
     }
-
+    
     // 6. Riparazione Esterna (opzionale)
     if ((repairAdmesh || repairMeshlab) && savedPaths.length > 0) {
         console.log("\n--- FASE 6: Riparazione Esterna ---");
-
+    
         const tools = await MeshRepair.detectAvailableTools();
         console.log(`   Available tools: ${tools.length > 0 ? tools.join(', ') : 'none'}`);
-
+    
         for (const filePath of savedPaths) {
             if (repairAdmesh && tools.includes('admesh')) {
                 console.log(`   🔧 Admesh: ${path.basename(filePath)}...`);
                 const success = await MeshRepair.repairWithAdmesh(filePath, verbose);
                 console.log(`   ${success ? '✅' : '❌'} ${path.basename(filePath)}`);
             }
-
+    
             if (repairMeshlab && tools.includes('meshlab')) {
                 console.log(`   🔧 Meshlab: ${path.basename(filePath)}...`);
                 const success = await MeshRepair.repairWithMeshlab(filePath, verbose);
@@ -586,8 +613,10 @@ async function runClipMode(
             }
         }
     }
+    
+        */
 
-    console.log("\n✅ Clip mode completato!");
+    console.log("\n✅ Clip mode completato (Streaming)!");
 }
 
 program.parse(process.argv);
