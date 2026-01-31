@@ -7,6 +7,7 @@ import { RegionSplitter } from './core/RegionSplitter';
 import { GuideParser } from './core/GuideParser';
 import { TriangleClipper } from './core/TriangleClipper';
 import { MeshRepair } from './utils/MeshRepair';
+import { SvgExporter } from './utils/SvgExporter';
 import { SvgBuilder } from './utils/SvgBuilder';
 import { ImageGenerator } from './utils/ImageGenerator';
 import path from 'path';
@@ -34,7 +35,9 @@ program
     .option('-f, --fix-manifold', 'Ripara mesh non-manifold usando manifold-3d dopo il clipping', false)
     .option('--repair-admesh', 'Ripara con admesh CLI (se installato)', false)
     .option('--autofix', 'Alias per --repair-admesh (Auto-fix manifold errors)', false)
+    .option('--autofix', 'Alias per --repair-admesh (Auto-fix manifold errors)', false)
     .option('--repair-meshlab', 'Ripara con meshlab CLI (se installato)', false)
+    .option('--svg-export', 'Esporta il layout dei tile in un unico file SVG (Experimental)', false)
     .action(async (file, options) => {
         await run(file, options);
     });
@@ -56,6 +59,7 @@ async function run(inputFile: string, opts: any) {
     const FIX_MANIFOLD = opts.fixManifold;
     const REPAIR_ADMESH = opts.repairAdmesh || opts.autofix;
     const REPAIR_MESHLAB = opts.repairMeshlab;
+    const SVG_EXPORT = opts.svgExport;
 
     if (!fs.existsSync(stlPath)) { console.error("File non trovato"); process.exit(1); }
 
@@ -65,7 +69,7 @@ async function run(inputFile: string, opts: any) {
 
     // Branch to Clip mode if enabled (preferred for large meshes)
     if (CLIP_MODE) {
-        await runClipMode(stlPath, GUIDE_FILE, OUT_DIR, PREVIEW_ONLY, VERBOSE, RESOLUTION, FIX_MANIFOLD, CAP_MODE, REPAIR_ADMESH, REPAIR_MESHLAB);
+        await runClipMode(stlPath, GUIDE_FILE, OUT_DIR, PREVIEW_ONLY, VERBOSE, RESOLUTION, FIX_MANIFOLD, CAP_MODE, REPAIR_ADMESH, REPAIR_MESHLAB, SVG_EXPORT);
         return;
     }
 
@@ -316,10 +320,11 @@ async function runClipMode(
     previewOnly: boolean,
     verbose: boolean,
     resolution: number,
-    fixManifold: boolean = false,
-    capMode: boolean = false,
+    FIX_MANIFOLD: boolean = false,
+    CAP_MODE: boolean = false,
     repairAdmesh: boolean = false,
-    repairMeshlab: boolean = false
+    repairMeshlab: boolean = false,
+    svgExport: boolean = false
 ) {
     if (!guideFile) {
         console.error("❌ Clip mode richiede un file guida (-g)");
@@ -344,6 +349,8 @@ async function runClipMode(
     const fullBbox = tempClipper.getBoundingBox(stlBuffer);
     const globalMinX = fullBbox.minX;
     const globalMaxY = fullBbox.maxY;
+    const globalMinY = fullBbox.minY;
+    const globalMaxX = fullBbox.maxX;
 
     if (verbose) {
         console.log(`   Global BBox: X[${fullBbox.minX.toFixed(1)}, ${fullBbox.maxX.toFixed(1)}] Y[${fullBbox.minY.toFixed(1)}, ${fullBbox.maxY.toFixed(1)}]`);
@@ -369,12 +376,22 @@ async function runClipMode(
             x: globalMinX + p.x * scaleX,
             y: globalMaxY - p.y * scaleY  // Y invertito
         }));
-        verticalPaths.push(seamMm);
+        if (seamMm.length > 0) {
+            // SNAP TO BOUNDS (Fix gap error)
+            // Vertical seam flows along Y. Start (Top) should be MaxY, End (Bottom) should be MinY.
+            // Coordinate mapping: y = globalMaxY - p.y * scaleY
+            // p.y=0 -> y=globalMaxY. p.y=Height -> y=globalMinY.
+            // Force first point to Top, last point to Bottom.
+            seamMm[0].y = globalMaxY;
+            seamMm[seamMm.length - 1].y = globalMinY;
+
+            verticalPaths.push(seamMm);
+        }
 
         if (verbose && seamMm.length > 0) {
             const xMin = Math.min(...seamMm.map((p: { x: number, y: number }) => p.x)).toFixed(1);
             const xMax = Math.max(...seamMm.map((p: { x: number, y: number }) => p.x)).toFixed(1);
-            console.log(`   Vertical path: X range [${xMin}, ${xMax}]`);
+            console.log(`   Vertical path: X range [${xMin}, ${xMax}] (Snapped Y)`);
         }
     }
 
@@ -397,16 +414,39 @@ async function runClipMode(
             x: globalMinX + p.y * scaleX,   // Trasposto
             y: globalMaxY - p.x * scaleY    // Trasposto + invertito
         }));
-        horizontalPaths.push(seamMm);
+        if (seamMm.length > 0) {
+            // SNAP TO BOUNDS (Fix gap error)
+            // Horizontal seam flows along X. Start (Left) should be MinX, End (Right) should be MaxX.
+            // Coordinate mapping: x = globalMinX + p.y * scaleX (Transposed logic)
+            // p.y (original x) = 0 -> x=globalMinX.
+
+            seamMm[0].x = globalMinX;
+            seamMm[seamMm.length - 1].x = globalMaxX;
+
+            horizontalPaths.push(seamMm);
+        }
 
         if (verbose && seamMm.length > 0) {
             const yMin = Math.min(...seamMm.map((p: { x: number, y: number }) => p.y)).toFixed(1);
             const yMax = Math.max(...seamMm.map((p: { x: number, y: number }) => p.y)).toFixed(1);
-            console.log(`   Horizontal path: Y range [${yMin}, ${yMax}]`);
+            console.log(`   Horizontal path: Y range [${yMin}, ${yMax}] (Snapped X)`);
         }
     }
 
-    console.log(`   -> ${verticalPaths.length} vertical, ${horizontalPaths.length} horizontal paths`);
+    // SORT: Ensure paths are spatially ordered (Left->Right, Top->Bottom)
+    verticalPaths.sort((a, b) => {
+        const avgA = a.reduce((sum, p) => sum + p.x, 0) / a.length;
+        const avgB = b.reduce((sum, p) => sum + p.x, 0) / b.length;
+        return avgA - avgB;
+    });
+
+    horizontalPaths.sort((a, b) => {
+        const avgA = a.reduce((sum, p) => sum + p.y, 0) / a.length;
+        const avgB = b.reduce((sum, p) => sum + p.y, 0) / b.length;
+        return avgA - avgB;
+    });
+
+    console.log(`   -> ${verticalPaths.length} vertical, ${horizontalPaths.length} horizontal paths (Sorted)`);
 
     // 3. Streaming Slicer Phase
     console.log("\n--- FASE 3: Streaming Slicing (New Architecture) ---");
@@ -429,7 +469,19 @@ async function runClipMode(
         horizontalPaths.forEach(p => builder.addCutLine(p, 'blue'));
 
         builder.save(svgPath);
-        builder.save(svgPath);
+    }
+
+    // --- FASE 5: SVG Export (New) ---
+    if (svgExport) {
+        // Using the original Seam Paths (Robust Method Phase 10)
+        // width and height arguments in GuideParser are in PIXELS (unless they match mm).
+        // GuideParser.parse takes width, height.
+        // We used widthMm and heightMm for SvgBuilder.
+        // Note: verticalPaths are in the coordinate space of the Guide (pixels or mm adjusted).
+        // Let's pass the same width/height used for parsing.
+
+        const svgOut = path.join(outDir, 'tiles_layout.svg');
+        await SvgExporter.generateFromPaths(verticalPaths, horizontalPaths, widthMm, heightMm, svgOut);
     }
 
     // --- FASE 4: Auto-Repair ---

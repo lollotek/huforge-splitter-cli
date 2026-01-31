@@ -1,33 +1,51 @@
 import { parse } from 'svg-parser';
 import { createCanvas, CanvasRenderingContext2D } from 'canvas';
-import { Path2D, applyPath2DToCanvasRenderingContext } from 'path2d'; 
+import { Path2D, applyPath2DToCanvasRenderingContext } from 'path2d';
 import fs from 'fs';
 
 // Setup Polyfill
 applyPath2DToCanvasRenderingContext(CanvasRenderingContext2D as any);
 
+export type Point = { x: number, y: number };
+
 export type GuideSet = {
-    verticals: boolean[][][];   
-    horizontals: boolean[][][]; 
+    verticals: boolean[][][];
+    horizontals: boolean[][][];
+    verticalPaths: Point[][];
+    horizontalPaths: Point[][];
 };
 
 export class GuideParser {
-    
+
     static parse(svgPath: string, width: number, height: number): GuideSet {
         console.log(`📖 Parsing guida SVG: ${svgPath}`);
         const svgContent = fs.readFileSync(svgPath, 'utf-8');
         const root = parse(svgContent);
-        
-        const guides: GuideSet = { verticals: [], horizontals: [] };
+
+        const guides: GuideSet = { verticals: [], horizontals: [], verticalPaths: [], horizontalPaths: [] };
 
         // FIX: Ora usiamo una funzione di ricerca più flessibile (ID o Label)
         const verticalGroup = this.findLayer(root, 'cuts-vertical');
         const horizontalGroup = this.findLayer(root, 'cuts-horizontal');
 
+        // Helper to convert SVG path strings to Point[]
+        const parsePath = (d: string): Point[] => {
+            // Very basic SVG path parser (supports M and L)
+            const pts: Point[] = [];
+            const commands = d.match(/[ML][^ML]*/g) || [];
+
+            for (const cmd of commands) {
+                const nums = cmd.trim().substring(1).trim().split(/[\s,]+/).map(Number);
+                if (nums.length >= 2) pts.push({ x: nums[0], y: nums[1] });
+            }
+            return pts;
+        };
+
         if (verticalGroup) {
             const paths = this.extractPaths(verticalGroup);
             console.log(`   -> Trovati ${paths.length} percorsi guida verticali.`);
             guides.verticals = paths.map(d => this.rasterizePath(d, width, height));
+            guides.verticalPaths = paths.map(d => parsePath(d));
         } else {
             console.log("   -> Nessun layer 'cuts-vertical' trovato.");
         }
@@ -36,6 +54,7 @@ export class GuideParser {
             const paths = this.extractPaths(horizontalGroup);
             console.log(`   -> Trovati ${paths.length} percorsi guida orizzontali.`);
             guides.horizontals = paths.map(d => this.rasterizePath(d, width, height));
+            guides.horizontalPaths = paths.map(d => parsePath(d));
         } else {
             console.log("   -> Nessun layer 'cuts-horizontal' trovato.");
         }
@@ -56,13 +75,13 @@ export class GuideParser {
         ctx.lineWidth = 40; // Larghezza del "corridoio" di ricerca
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
-        
+
         const p = new Path2D(pathData);
         (ctx as any).stroke(p);
 
         const imgData = ctx.getImageData(0, 0, w, h);
         const data = imgData.data;
-        
+
         const grid: boolean[][] = [];
         for (let y = 0; y < h; y++) {
             const row: boolean[] = [];
@@ -80,10 +99,10 @@ export class GuideParser {
         if (node.properties) {
             // 1. Controllo ID diretto
             if (node.properties.id === targetName) return node;
-            
+
             // 2. Controllo Inkscape Label (spesso usato dai software di grafica)
             if (node.properties['inkscape:label'] === targetName) return node;
-            
+
             // 3. Controllo Label generico
             if (node.properties.label === targetName) return node;
         }
@@ -108,7 +127,7 @@ export class GuideParser {
                 const { x1, y1, x2, y2 } = node.properties;
                 paths.push(`M ${x1} ${y1} L ${x2} ${y2}`);
             }
-            
+
             if (node.children) {
                 node.children.forEach(traverse);
             }

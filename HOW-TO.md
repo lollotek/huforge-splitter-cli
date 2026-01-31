@@ -53,6 +53,7 @@ npx ts-node src/index.ts "input/mio_modello.stl" -g "input/guide.svg" -p
 | `-c` | `--clip` | **[Consigliato]** Usa la modalità **Streaming Slicer**. Necessario per file grandi e per evitare OOM. | `false` | Se omesso, usa una modalità legacy. Usalo sempre per HueForge. |
 | `-r` | `--resolution` | Risoluzione di analisi (mm/pixel). Definisce quanto densa è la griglia di navigazione. | `0.5` | `0.5` è un buon compromesso. `0.1` è più preciso ma più lento. |
 | `--autofix`| `-f` | Tenta di riparare automaticamente i file generati usando `admesh`. | `false` | Richiede `admesh` installato nel sistema. |
+| `--svg-export`| - | Esporta il layout 2D dei tile in un singolo file SVG. | `false` | Utile per taglio laser o CNC. I tile sono separati (exploded view). |
 | `-o` | `--out` | Cartella di output dove salvare i file STL generati. | `output` | La cartella viene creata se non esiste. |
 | `-p` | `--preview` | Genera solo l'anteprima dei tagli (SVG) senza creare i file STL. | `false` | Utile per debuggare le guide SVG. |
 | `-w` | `--width` | Larghezza fisica del piatto (mm). | `200` | Usato per il calcolo della griglia. |
