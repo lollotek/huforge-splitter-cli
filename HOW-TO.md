@@ -11,9 +11,12 @@ Il tool è progettato per preservare al 100% la geometria originale (nessuna vox
 - **NPM** (incluso in Node.js)
 
 ### Opzionali (per Auto-Repair)
-Per utilizzare la funzionalità di riparazione automatica (`--autofix`), è necessario installare uno dei seguenti tool e aggiungerli al PATH di sistema:
-- **ADMesh** (Consigliato per velocità): Tool command-line per riparare STL.
-- **MeshLab** (Alternativa): Software di processing mesh.
+Per utilizzare la funzionalità di riparazione automatica (`--autofix`):
+- **ADMesh**: Tool command-line leggero e veloce.
+- **PrusaSlicer**: Se installato (e disponibile nel PATH come `prusa-slicer-console` o `prusa-slicer`), viene rilevato automaticamente e usato per la riparazione.
+  *Nota*: Assicurarsi che la versione installata supporti il flag `--repair`.
+
+Se nessuno dei due è trovato, `--autofix` verrà ignorato con un warning.
 
 ## 🚀 Installazione
 

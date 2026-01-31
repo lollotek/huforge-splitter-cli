@@ -33,7 +33,6 @@ program
     .option('--cap', 'Genera cap triangles per chiudere mesh (watertight)', false)
     .option('-f, --fix-manifold', 'Ripara mesh non-manifold usando manifold-3d dopo il clipping', false)
     .option('--repair-admesh', 'Ripara con admesh CLI (se installato)', false)
-    .option('--repair-admesh', 'Ripara con admesh CLI (se installato)', false)
     .option('--autofix', 'Alias per --repair-admesh (Auto-fix manifold errors)', false)
     .option('--repair-meshlab', 'Ripara con meshlab CLI (se installato)', false)
     .action(async (file, options) => {
