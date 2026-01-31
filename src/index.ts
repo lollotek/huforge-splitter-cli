@@ -33,6 +33,8 @@ program
     .option('--cap', 'Genera cap triangles per chiudere mesh (watertight)', false)
     .option('-f, --fix-manifold', 'Ripara mesh non-manifold usando manifold-3d dopo il clipping', false)
     .option('--repair-admesh', 'Ripara con admesh CLI (se installato)', false)
+    .option('--repair-admesh', 'Ripara con admesh CLI (se installato)', false)
+    .option('--autofix', 'Alias per --repair-admesh (Auto-fix manifold errors)', false)
     .option('--repair-meshlab', 'Ripara con meshlab CLI (se installato)', false)
     .action(async (file, options) => {
         await run(file, options);
@@ -53,7 +55,7 @@ async function run(inputFile: string, opts: any) {
     const CLIP_MODE = opts.clip;
     const CAP_MODE = opts.cap;
     const FIX_MANIFOLD = opts.fixManifold;
-    const REPAIR_ADMESH = opts.repairAdmesh;
+    const REPAIR_ADMESH = opts.repairAdmesh || opts.autofix;
     const REPAIR_MESHLAB = opts.repairMeshlab;
 
     if (!fs.existsSync(stlPath)) { console.error("File non trovato"); process.exit(1); }
@@ -428,10 +430,22 @@ async function runClipMode(
         horizontalPaths.forEach(p => builder.addCutLine(p, 'blue'));
 
         builder.save(svgPath);
+        builder.save(svgPath);
     }
 
-    // Skip old logic
-    return;
+    // --- FASE 4: Auto-Repair ---
+    if (repairAdmesh) {
+        console.log("\n--- FASE 4: Auto-Repair (Admesh) ---");
+        const files = fs.readdirSync(outDir).filter(f => f.endsWith('.stl'));
+        if (files.length === 0) {
+            console.log("⚠️  Nessun file STL trovato in output per la riparazione.");
+        } else {
+            for (const file of files) {
+                const fullPath = path.join(outDir, file);
+                await MeshRepair.repairFile(fullPath);
+            }
+        }
+    }
     /*
     const clipper = new TriangleClipper(verbose);
     // ... old clipper logic ...
