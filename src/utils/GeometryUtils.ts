@@ -65,4 +65,33 @@ export class GeometryUtils {
   static pointSide(p: Point2D, a: Point2D, b: Point2D): number {
     return (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
   }
+
+  /**
+   * Suddivide un triangolo in 4 sotto-triangoli più piccoli (tessellation 1 level).
+   * v1
+   * |  \
+   * m1--m3
+   * | \/ |
+   * v2--m2--v3
+   */
+  static subdivideTriangle(t: [Point3D, Point3D, Point3D]): [Point3D, Point3D, Point3D][] {
+    const v1 = t[0], v2 = t[1], v3 = t[2];
+    const m1 = this.interpolate3D(v1, v2, 0.5);
+    const m2 = this.interpolate3D(v2, v3, 0.5);
+    const m3 = this.interpolate3D(v3, v1, 0.5);
+
+    return [
+      [v1, m1, m3],
+      [m1, v2, m2],
+      [m1, m2, m3], // Center inverted
+      [m3, m2, v3]
+    ];
+  }
+
+  static getMaxEdgeLength(t: [Point3D, Point3D, Point3D]): number {
+    const d1 = Math.hypot(t[0].x - t[1].x, t[0].y - t[1].y, t[0].z - t[1].z);
+    const d2 = Math.hypot(t[1].x - t[2].x, t[1].y - t[2].y, t[1].z - t[2].z);
+    const d3 = Math.hypot(t[2].x - t[0].x, t[2].y - t[0].y, t[2].z - t[0].z);
+    return Math.max(d1, d2, d3);
+  }
 }

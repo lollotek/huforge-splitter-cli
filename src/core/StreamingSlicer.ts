@@ -1,6 +1,7 @@
 import fs from 'fs';
 import { GeometryUtils, Point3D } from '../utils/GeometryUtils';
 import { TriangleSplitter } from './TriangleSplitter';
+import { CapUtils } from '../utils/CapUtils';
 
 type CutPath = { x: number, y: number }[];
 
@@ -18,6 +19,17 @@ export class StreamingSlicer {
   private vBounds: { min: number, max: number }[] = [];
   private hBounds: { min: number, max: number }[] = [];
 
+  // Cut Paths storage for Cap Intersections
+  private vPaths: CutPath[] = [];
+  private hPaths: CutPath[] = [];
+
+  // Storage for cut segments per tile edge (Key: TileIndex string -> List of segments)
+  // Segments: { p1, p2 }
+  // We need to know WHICH edge this segment belongs to (Right of C0 / Left of C1).
+  // A vertical cut `pathIdx` creates a "Right Wall" for Left Tile (Col `pathIdx`) and "Left Wall" for Right Tile (Col `pathIdx+1`).
+  private verticalCaps: Map<string, [Point3D, Point3D][]> = new Map();
+  private horizontalCaps: Map<string, [Point3D, Point3D][]> = new Map();
+
   constructor(inputPath: string, outputDir: string, verbose: boolean = false) {
     this.inputPath = inputPath;
     this.outputDir = outputDir;
@@ -30,6 +42,9 @@ export class StreamingSlicer {
 
   // Chiude tutti i file aperti e aggiorna il conteggio triangoli nell'header
   private closeHandles() {
+    console.log("\n--- Generating Caps (Walls) ---");
+    this.generateCaps();
+
     console.log("\n--- Slicer Stats ---");
     for (const [key, handle] of this.fileHandles.entries()) {
       // Update header with accurate triangle count
@@ -44,6 +59,132 @@ export class StreamingSlicer {
       console.log(`Tile ${key}: ${handle.count} triangles`);
     }
     this.fileHandles.clear();
+  }
+
+  private generateCaps() {
+    // Generate Vertical Walls
+    for (const [key, segments] of this.verticalCaps.entries()) {
+      const pathIdx = parseInt(key.split('_')[1]);
+      const walls = CapUtils.triangulateSegments(segments);
+
+      // Slice the wall horizontally (Recursive)
+      // Left Tile (Col pathIdx) - Needs Right Wall
+      for (const tri of walls) {
+        this.processHorizontalSlices(tri, this.hPaths, 0, pathIdx, false);
+        // Right Tile (Col pathIdx+1) - Needs Left Wall (Inverted)
+        const inv = [tri[0], tri[2], tri[1]] as [Point3D, Point3D, Point3D];
+        this.processHorizontalSlices(inv, this.hPaths, 0, pathIdx + 1, false);
+      }
+    }
+
+    for (const [key, segments] of this.horizontalCaps.entries()) {
+      const pathIdx = parseInt(key.split('_')[1]);
+      const walls = CapUtils.triangulateSegments(segments);
+
+      // Slice the wall vertically (Recursive)
+      for (const tri of walls) {
+        // Top Tile (Row pathIdx)
+        // We pass hPathIdx as 'rowIdx' implicitly via the logic?
+        // processVerticalSlices takes (..., pathIdx, hPaths).
+        // But here 'pathIdx' is the ROW index.
+
+        // Wait. processVerticalSlices takes `pathIdx` as COLUMN index.
+        // We are processing a Horizontal Wall. It spans ALL COLUMNS.
+        // So we start at Vertical Cut 0.
+        // But what mechanism puts it in the correct ROW?
+        // processVerticalSlices recurses until it calls processHorizontalSlices.
+        // processHorizontalSlices determines the ROW.
+        // BUT `processHorizontalSlices` checks Y against hPath.
+        // The Horizontal Wall is AT Y = hPath[pathIdx].
+        // It might float due to precision.
+        // If we rely on bounds check, it might be ambiguous.
+        // HOWEVER, we KNOW the row index is `pathIdx`.
+        // Can we force it? 
+        // `processHorizontalSlices` calculates row index.
+
+        // Actually, for Horizontal Walls, we ALREADY KNOW the Row Index.
+        // We just need to split it by Columns.
+        // Does `processVerticalSlices` allow us to specify the Row?
+        // No, it calls `processHorizontalSlices` with start row 0.
+
+        // If we use the standard pipeline, the Wall (which is horizontal) will fall into the correct Row bucket based on Y.
+        // Since it was generated from the cut at `hPath[pathIdx]`, its Y is exactly on the boundary.
+        // It might fall into `pathIdx` or `pathIdx+1`.
+        // Ideally it belongs to `pathIdx` (Bottom of Top Tile).
+        // And Inverted belongs to `pathIdx+1` (Top of Bottom Tile).
+
+        // Let's trust the geometry.
+        this.processVerticalSlices(tri, this.vPaths, 0, this.hPaths, false);
+
+        const inv = [tri[0], tri[2], tri[1]] as [Point3D, Point3D, Point3D];
+        this.processVerticalSlices(inv, this.vPaths, 0, this.hPaths, false);
+      }
+    }
+  }
+
+  private distributeWallsToRows(walls: Point3D[][], vPathIdx: number, type: 'vertical') {
+    // vPathIdx defines the Column Boundary.
+    // We need to split these wall triangles into Rows (0..M) based on Y.
+    // We use hBounds.
+
+    // For each wall triangle, find which Row it belongs to.
+    // Since walls are small, usually they fall in one row.
+    // We check Centroid Y.
+
+    for (const tri of walls) {
+      const y = (tri[0].y + tri[1].y + tri[2].y) / 3;
+      // Find row
+      let row = 0;
+      for (let i = 0; i < this.hBounds.length; i++) {
+        // hBounds[i] is the Horizontal Cut Line between Row i and Row i+1.
+        // If y > bound (Bottom), it's next row?
+        // HueSlicer Y: 0 Top?
+        // Let's use the bounds:
+        // Bound is Y ranges.
+        // Wait, hBounds is MIN/MAX of the CUT PATH.
+        // Cut Path [i] separates Row i and Row i+1.
+        // If Y < CutPath[i].min -> Row i.
+        // If Y > CutPath[i].max -> Row i+1.
+        // If in between -> Ambiguous (Overlap). Just pick closest?
+        // Or dup?
+
+        if (y > this.hBounds[i].max) {
+          row = i + 1;
+        }
+      }
+
+      // Write to Tile: Row `row`, Col `vPathIdx` (Left of cut) and Col `vPathIdx+1` (Right of cut)
+      // Left Tile (Col vPathIdx): Needs Wall pointing RIGHT.
+      // Right Tile (Col vPathIdx+1): Needs Wall pointing LEFT.
+
+      // Write to Left Tile
+      this.writeTriangleFromPoints(row, vPathIdx, tri);
+
+      // Write to Right Tile (Inverted)
+      const inv = [tri[0], tri[2], tri[1]];
+      this.writeTriangleFromPoints(row, vPathIdx + 1, inv);
+    }
+  }
+
+  private distributeWallsToCols(walls: Point3D[][], hPathIdx: number) {
+    // hPathIdx defines Row Boundary (Row hPathIdx / Row hPathIdx+1).
+    // We need to bin into Cols.
+    for (const tri of walls) {
+      const x = (tri[0].x + tri[1].x + tri[2].x) / 3;
+      let col = 0;
+      for (let i = 0; i < this.vBounds.length; i++) {
+        if (x > this.vBounds[i].max) {
+          col = i + 1;
+        }
+      }
+
+      // Top Tile (Row hPathIdx): Needs Bottom Wall
+      this.writeTriangleFromPoints(hPathIdx, col, tri);
+
+      // Bottom Tile (Row hPathIdx + 1): Needs Top Wall (Inverted)
+      const inv = [tri[0], tri[2], tri[1]];
+      this.writeTriangleFromPoints(hPathIdx + 1, col, inv);
+    }
   }
 
   private getFileHandle(row: number, col: number): number {
@@ -78,6 +219,8 @@ export class StreamingSlicer {
 
   async process(verticalCutPaths: CutPath[], horizontalCutPaths: CutPath[]): Promise<void> {
     console.log(`Starting Streaming Slicer on ${this.inputPath}...`);
+    this.vPaths = verticalCutPaths;
+    this.hPaths = horizontalCutPaths;
 
     // Sort paths by coordinate (Ascending) to ensure correct binning order
     // Vertical: Sort by avg X
@@ -150,13 +293,19 @@ export class StreamingSlicer {
 
     const t: [Point3D, Point3D, Point3D] = [v1, v2, v3];
 
-    // Start recursive slicing pipeline
-    // 1. Slice Vertically
-    // 2. Determine Columns
-    // 3. For each piece: Slice Horizontally
-    // 4. Determine Rows -> Write to File
+    // Tessellate if too large to capture path curvature.
+    this.processTessellated(t, vPaths, hPaths);
+  }
 
-    this.processVerticalSlices(t, vPaths, 0, hPaths);
+  private processTessellated(t: [Point3D, Point3D, Point3D], vPaths: CutPath[], hPaths: CutPath[], depth: number = 0) {
+    if (depth < 3 && GeometryUtils.getMaxEdgeLength(t) > 5.0) {
+      const subs = GeometryUtils.subdivideTriangle(t);
+      for (const sub of subs) {
+        this.processTessellated(sub, vPaths, hPaths, depth + 1);
+      }
+    } else {
+      this.processVerticalSlices(t, vPaths, 0, hPaths);
+    }
   }
 
   // Trova l'intervallo di indici (colonne o righe) che il triangolo copre
@@ -278,10 +427,10 @@ export class StreamingSlicer {
     return { p1, p2 };
   }
 
-  private processVerticalSlices(t: Point3D[], vPaths: CutPath[], pathIdx: number, hPaths: CutPath[]) {
+  private processVerticalSlices(t: Point3D[], vPaths: CutPath[], pathIdx: number, hPaths: CutPath[], collectCaps: boolean = true) {
     // Base case: No more vertical paths to check -> We are in column [pathIdx]
     if (pathIdx >= vPaths.length) {
-      this.processHorizontalSlices(t, hPaths, 0, pathIdx);
+      this.processHorizontalSlices(t, hPaths, 0, pathIdx, collectCaps);
       return;
     }
 
@@ -295,13 +444,13 @@ export class StreamingSlicer {
 
     if (maxX < bounds.min - 0.1) {
       // Completely Left -> Col [pathIdx]
-      this.processHorizontalSlices(t, hPaths, 0, pathIdx);
+      this.processHorizontalSlices(t, hPaths, 0, pathIdx, collectCaps);
       return;
     }
 
     if (minX > bounds.max + 0.1) {
       // Completely Right -> Check next path (Col [pathIdx+1] or further)
-      this.processVerticalSlices(t, vPaths, pathIdx + 1, hPaths);
+      this.processVerticalSlices(t, vPaths, pathIdx + 1, hPaths, collectCaps);
       return;
     }
 
@@ -315,17 +464,40 @@ export class StreamingSlicer {
 
     const { p1, p2 } = this.getBestFitLine(t, path, 'x'); // Vertical Path -> cuts along Y axis (fit X)
 
-    const { left, right } = TriangleSplitter.splitTriangleByLine(t as [Point3D, Point3D, Point3D], p1, p2);
+    const splitRes = TriangleSplitter.splitTriangleByLine(t as [Point3D, Point3D, Point3D], p1, p2);
+    const { left, right, cutSegment } = splitRes;
+
+    if (cutSegment && collectCaps) {
+      // Store for "Right Wall" of Col [pathIdx]
+      // And "Left Wall" of Col [pathIdx + 1]
+      // Note: caps are shared but might need reversing normal?
+      // Let's store raw segments, cap generator handles topology.
+      const key = `v_${pathIdx}`; // ID for this vertical path
+      // We actually need per-tile storage? No, we generate the wall for the PATH, then split the wall?
+      // No, the Wall IS the interface. 
+      // We append these wall triangles to BOTH tiles (with flipped normals).
+      // HARD part: We only stream to tiles. We don't hold tiles in memory.
+      // We can write Wall Triangles immediately?
+      // YES.
+
+      // Wait, cutSegment is a LINE. We need 2 segments to make a Quad?
+      // No, we need to collect ALL segments for this Path, then triangulate the hole.
+      // We cannot stream Cap triangles one by one because we don't know the neighbor.
+
+      // So we MUST Buffer `verticalCaps`.
+      if (!this.verticalCaps.has(key)) this.verticalCaps.set(key, []);
+      this.verticalCaps.get(key)!.push(cutSegment);
+    }
 
     for (const tri of left) {
-      this.processHorizontalSlices(tri, hPaths, 0, pathIdx);
+      this.processHorizontalSlices(tri, hPaths, 0, pathIdx, collectCaps);
     }
     for (const tri of right) {
-      this.processVerticalSlices(tri, vPaths, pathIdx + 1, hPaths);
+      this.processVerticalSlices(tri, vPaths, pathIdx + 1, hPaths, collectCaps);
     }
   }
 
-  private processHorizontalSlices(t: Point3D[], hPaths: CutPath[], pathIdx: number, colIdx: number) {
+  private processHorizontalSlices(t: Point3D[], hPaths: CutPath[], pathIdx: number, colIdx: number, collectCaps: boolean = true) {
     // Base case: No more horizontal paths -> Row [pathIdx]
     if (pathIdx >= hPaths.length) {
       this.writeTriangleFromPoints(pathIdx, colIdx, t);
@@ -349,13 +521,20 @@ export class StreamingSlicer {
     }
 
     if (minY > bounds.max + 0.1) {
-      this.processHorizontalSlices(t, hPaths, pathIdx + 1, colIdx);
+      this.processHorizontalSlices(t, hPaths, pathIdx + 1, colIdx, collectCaps);
       return;
     }
 
     const { p1, p2 } = this.getBestFitLine(t, path, 'y'); // Horizontal Path -> cuts along X axis (fit Y)
 
-    const { left, right } = TriangleSplitter.splitTriangleByLine(t as [Point3D, Point3D, Point3D], p1, p2);
+    const splitRes = TriangleSplitter.splitTriangleByLine(t as [Point3D, Point3D, Point3D], p1, p2);
+    const { left, right, cutSegment } = splitRes;
+
+    if (cutSegment && collectCaps) {
+      const key = `h_${pathIdx}`;
+      if (!this.horizontalCaps.has(key)) this.horizontalCaps.set(key, []);
+      this.horizontalCaps.get(key)!.push(cutSegment);
+    }
 
     // For Horizontal Line (Left->Right):
     // "Left" (Positive Side) is Y > Path (Bottom).
@@ -371,7 +550,7 @@ export class StreamingSlicer {
       this.writeTriangleFromPoints(pathIdx, colIdx, tri);
     }
     for (const tri of left) {
-      this.processHorizontalSlices(tri, hPaths, pathIdx + 1, colIdx);
+      this.processHorizontalSlices(tri, hPaths, pathIdx + 1, colIdx, collectCaps);
     }
   }
 

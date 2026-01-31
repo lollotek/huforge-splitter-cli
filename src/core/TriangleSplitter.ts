@@ -9,7 +9,7 @@ export class TriangleSplitter {
     t: [Point3D, Point3D, Point3D],
     lineStart: Point2D,
     lineEnd: Point2D
-  ): { left: Point3D[][], right: Point3D[][] } {
+  ): { left: Point3D[][], right: Point3D[][], cutSegment?: [Point3D, Point3D] } {
     const [v0, v1, v2] = t;
 
     // Calcola "lato" di ogni vertice (+1 sinistra, -1 destra, 0 collineare)
@@ -33,42 +33,42 @@ export class TriangleSplitter {
     const leftPoly: Point3D[] = [];
     const rightPoly: Point3D[] = [];
 
+    // Capture intersection points
+    const intersections: Point3D[] = [];
+
     for (let i = 0; i < 3; i++) {
+      // ... (Loop logic same as before, but push to intersections)
+      // Check lines 36-65 of checking edges
       const curr = vertices[i];
       const next = vertices[(i + 1) % 3];
       const currS = signs[i];
       const nextS = signs[(i + 1) % 3];
 
-      // Aggiungi vertice corrente alla lista appropriata
       if (currS >= 0) leftPoly.push(curr);
       else rightPoly.push(curr);
 
-      // Se attraversano la linea, calcola intersezione
       if ((currS > 0 && nextS < 0) || (currS < 0 && nextS > 0)) {
-        // Calcola T di intersezione
-        const res = GeometryUtils.segmentIntersection(curr, next, lineStart, lineEnd);
-        if (res.type === 'point' && res.point) {
-          // Trova Z interpolando
-          // Segment intersection rida point 2d e T
-          // Ma qui segmentIntersection interseca Segmento AB con Segmento CD.
-          // Noi vogliamo Linea CD infinita. 
-          // Possiamo usare formula diretta intersez retta:
-
-          // Intersect Edge (curr -> next) con Linea (start -> end)
-          const intersectPt = this.intersectEdgeInfiniteLine(curr, next, lineStart, lineEnd);
-          if (intersectPt) {
-            leftPoly.push(intersectPt);
-            rightPoly.push(intersectPt);
-          }
+        const intersectPt = this.intersectEdgeInfiniteLine(curr, next, lineStart, lineEnd);
+        if (intersectPt) {
+          leftPoly.push(intersectPt);
+          rightPoly.push(intersectPt);
+          intersections.push(intersectPt);
         }
       }
     }
 
-    // Triangola i poligoni risultanti (possono essere 3-gon o 4-gon)
-    return {
+    // Triangola i poligoni risultanti
+    const res = {
       left: this.triangulateConvex(leftPoly),
-      right: this.triangulateConvex(rightPoly)
+      right: this.triangulateConvex(rightPoly),
+      cutSegment: undefined as [Point3D, Point3D] | undefined
     };
+
+    if (intersections.length === 2) {
+      res.cutSegment = [intersections[0], intersections[1]];
+    }
+
+    return res;
   }
 
   private static intersectEdgeInfiniteLine(p1: Point3D, p2: Point3D, l1: Point2D, l2: Point2D): Point3D | null {
