@@ -6,3 +6,4 @@ output/
 *.log
 *.3mf
 SCAD/
+dist/
