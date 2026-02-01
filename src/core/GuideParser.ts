@@ -44,8 +44,8 @@ export class GuideParser {
         if (verticalGroup) {
             const paths = this.extractPaths(verticalGroup);
             console.log(`   -> Trovati ${paths.length} percorsi guida verticali.`);
-            guides.verticals = paths.map(d => this.rasterizePath(d, width, height));
-            guides.verticalPaths = paths.map(d => parsePath(d));
+            guides.verticals = paths.map(p => this.rasterizePath(p.d, p.strokeWidth, width, height));
+            guides.verticalPaths = paths.map(p => parsePath(p.d));
         } else {
             console.log("   -> Nessun layer 'cuts-vertical' trovato.");
         }
@@ -53,8 +53,8 @@ export class GuideParser {
         if (horizontalGroup) {
             const paths = this.extractPaths(horizontalGroup);
             console.log(`   -> Trovati ${paths.length} percorsi guida orizzontali.`);
-            guides.horizontals = paths.map(d => this.rasterizePath(d, width, height));
-            guides.horizontalPaths = paths.map(d => parsePath(d));
+            guides.horizontals = paths.map(p => this.rasterizePath(p.d, p.strokeWidth, width, height));
+            guides.horizontalPaths = paths.map(p => parsePath(p.d));
         } else {
             console.log("   -> Nessun layer 'cuts-horizontal' trovato.");
         }
@@ -62,7 +62,7 @@ export class GuideParser {
         return guides;
     }
 
-    private static rasterizePath(pathData: string, w: number, h: number): boolean[][] {
+    private static rasterizePath(pathData: string, strokeWidth: number, w: number, h: number): boolean[][] {
         const canvas = createCanvas(w, h);
         const ctx = canvas.getContext('2d');
 
@@ -72,7 +72,7 @@ export class GuideParser {
 
         // Disegna il path in bianco (ROI)
         ctx.strokeStyle = 'white';
-        ctx.lineWidth = 40; // Larghezza del "corridoio" di ricerca
+        ctx.lineWidth = strokeWidth; // Usa larghezza dinamica dallo stroke SVG
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
 
@@ -116,16 +116,21 @@ export class GuideParser {
         return null;
     }
 
-    private static extractPaths(groupNode: any): string[] {
-        const paths: string[] = [];
+    private static extractPaths(groupNode: any): { d: string, strokeWidth: number }[] {
+        const paths: { d: string, strokeWidth: number }[] = [];
         // Navigazione ricorsiva dentro il gruppo per trovare tutti i path
-        // (A volte Inkscape raggruppa path dentro path)
         const traverse = (node: any) => {
+            let strokeWidth = 40; // Default
+            if (node.properties && node.properties['stroke-width']) {
+                const sw = parseFloat(node.properties['stroke-width']);
+                if (!isNaN(sw)) strokeWidth = sw;
+            }
+
             if (node.tagName === 'path' && node.properties.d) {
-                paths.push(node.properties.d);
+                paths.push({ d: node.properties.d, strokeWidth });
             } else if (node.tagName === 'line') {
                 const { x1, y1, x2, y2 } = node.properties;
-                paths.push(`M ${x1} ${y1} L ${x2} ${y2}`);
+                paths.push({ d: `M ${x1} ${y1} L ${x2} ${y2}`, strokeWidth });
             }
 
             if (node.children) {
