@@ -1,7 +1,6 @@
 import { Command } from 'commander';
 import { HeightMapper } from './core/HeightMapper';
 import { GuideParser } from './core/GuideParser';
-import { TriangleClipper } from './core/TriangleClipper';
 import { SvgExporter } from './utils/SvgExporter';
 import { SvgBuilder } from './utils/SvgBuilder';
 import path from 'path';
@@ -50,28 +49,11 @@ async function run(inputFile: string, opts: any) {
     const widthMm = mapData.width * RESOLUTION;
     const heightMm = mapData.height * RESOLUTION;
 
-    // Leggi STL per ottenere bounding box COMPLETO
-    const stlBuffer = fs.readFileSync(stlPath);
-    const triangleCount = stlBuffer.readUInt32LE(80);
-    console.log(`   Triangles: ${triangleCount}`);
-
-    // Usa TriangleClipper per calcolare bbox completo
-    const tempClipper = new TriangleClipper(false);
-    const fullBbox = tempClipper.getBoundingBox(stlBuffer);
-    const globalMinX = fullBbox.minX;
-    const globalMaxY = fullBbox.maxY;
-    const globalMinY = fullBbox.minY;
-    const globalMaxX = fullBbox.maxX;
-
-    if (VERBOSE) {
-        console.log(`   Global BBox: X[${fullBbox.minX.toFixed(1)}, ${fullBbox.maxX.toFixed(1)}] Y[${fullBbox.minY.toFixed(1)}, ${fullBbox.maxY.toFixed(1)}]`);
-    }
-
     // 2. Parse Guide SVG per estrarre seam paths
     console.log("\n--- FASE 2: Estrazione Seam Paths ---");
     const guides = GuideParser.parse(GUIDE_FILE, mapData.width, mapData.height);
 
-    // Estrai paths (world coords mm) usando SeamFinder
+    // Estrai paths (SVG Layout coords mm 0,0 Top-Left) usando SeamFinder
     const verticalPaths: { x: number, y: number }[][] = [];
     const horizontalPaths: { x: number, y: number }[][] = [];
 
@@ -82,15 +64,15 @@ async function run(inputFile: string, opts: any) {
         const finder = new SeamFinder(mapData.grid, mapData.width, mapData.height);
         finder.setMask(mask);
         const seamPixels = finder.findVerticalSeam(0, mapData.width - 1);
-        // Converti pixel -> world coords mm
+        // Converti pixel -> SVG coords mm (Y-Down, 0,0 Top-Left)
         const seamMm = seamPixels.map((p: { x: number, y: number }) => ({
-            x: globalMinX + p.x * scaleX,
-            y: globalMaxY - p.y * scaleY  // Y invertito
+            x: p.x * scaleX,
+            y: p.y * scaleY
         }));
         if (seamMm.length > 0) {
             // SNAP TO BOUNDS (Fix gap error)
-            seamMm[0].y = globalMaxY;
-            seamMm[seamMm.length - 1].y = globalMinY;
+            seamMm[0].y = 0;
+            seamMm[seamMm.length - 1].y = heightMm;
 
             verticalPaths.push(seamMm);
         }
@@ -131,13 +113,13 @@ async function run(inputFile: string, opts: any) {
         finder.setMask(transposedMask);
         const seamPixels = finder.findVerticalSeam(0, transposedW - 1);
         const seamMm = seamPixels.map((p: { x: number, y: number }) => ({
-            x: globalMinX + p.y * scaleX,   // Trasposto
-            y: globalMaxY - p.x * scaleY    // Trasposto + invertito
+            x: p.y * scaleX,   // Trasposto (y originale = x)
+            y: p.x * scaleY    // Trasposto (x originale = y)
         }));
         if (seamMm.length > 0) {
             // SNAP TO BOUNDS (Fix gap error)
-            seamMm[0].x = globalMinX;
-            seamMm[seamMm.length - 1].x = globalMaxX;
+            seamMm[0].x = 0;
+            seamMm[seamMm.length - 1].x = widthMm;
 
             horizontalPaths.push(seamMm);
         }
