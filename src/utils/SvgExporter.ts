@@ -215,6 +215,7 @@ export class SvgExporter {
     }
 
     // 4. Write File
+    const generatedFiles: string[] = [];
     const m = 0; // increment for margin
     const vbX = minX - m;
     const vbY = minY - m;
@@ -222,16 +223,20 @@ export class SvgExporter {
     const vbH = (maxY - minY) + m * 2;
 
     // Fallback if empty
-    if (!isFinite(vbW)) { console.warn("SVG Bounds infinite?"); return; }
+    if (!isFinite(vbW)) { console.warn("SVG Bounds infinite?"); return []; }
 
-    explodedTiles.forEach(tile => {
-      let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${vbX.toFixed(2)} ${vbY.toFixed(2)} ${vbW.toFixed(2)} ${vbH.toFixed(2)}" width="${vbW}mm" height="${vbH}mm" style="background-color:white">\n`;
-      svg += `<style> { fill:#f0f0f0; stroke:none; } </style>\n`;
-      svg += tile.svg;
-      svg += `\n</svg>`;
+    for (const tile of explodedTiles) {
+      let svgContent = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${vbX.toFixed(2)} ${vbY.toFixed(2)} ${vbW.toFixed(2)} ${vbH.toFixed(2)}" width="${vbW}mm" height="${vbH}mm" style="background-color:white">\n`;
+      svgContent += `<style> .tile { fill:#f0f0f0; stroke:none; } </style>\n`;
+      svgContent += tile.svg;
+      svgContent += `\n</svg>`;
+
       const svgOut = path.join(outputPath, `${tile.id}.svg`);
-      fs.writeFileSync(svgOut, svg);
+      fs.writeFileSync(svgOut, svgContent);
       console.log(`💾 SVG Layout saved: ${svgOut}`);
-    });
+      generatedFiles.push(svgOut);
+    }
+
+    return generatedFiles;
   }
 }

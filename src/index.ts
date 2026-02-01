@@ -3,6 +3,7 @@ import { HeightMapper } from './core/HeightMapper';
 import { GuideParser } from './core/GuideParser';
 import { SvgExporter } from './utils/SvgExporter';
 import { SvgBuilder } from './utils/SvgBuilder';
+import { ScadGenerator } from './utils/ScadGenerator';
 import path from 'path';
 import fs from 'fs';
 
@@ -20,6 +21,8 @@ program
     .option('-o, --out <path>', 'Cartella di output', 'output')
     .option('-v, --verbose', 'Attiva log di debug', false)
     .option('--preview', 'Genera solo anteprima SVG, non esporta i singoli tile', false)
+    .option('--generate-stls', 'Usa OpenSCAD per generare gli STL finali dei tile', false)
+    .option('--openscad <path>', 'Percorso eseguibile OpenSCAD', 'openscad')
     .action(async (file, options) => {
         await run(file, options);
     });
@@ -33,6 +36,8 @@ async function run(inputFile: string, opts: any) {
     const OUT_DIR = opts.out;
     const VERBOSE = opts.verbose;
     const PREVIEW_ONLY = opts.preview;
+    const GENERATE_STLS = opts.generateStls;
+    const OPENSCAD_PATH = opts.openscad;
 
     if (!fs.existsSync(stlPath)) { console.error("File non trovato"); process.exit(1); }
     if (!fs.existsSync(GUIDE_FILE)) { console.error("File guida non trovato"); process.exit(1); }
@@ -40,6 +45,7 @@ async function run(inputFile: string, opts: any) {
     console.log(`🚀 Avvio HueSlicer SVG Generator su: ${path.basename(stlPath)}`);
     console.log(`⚙️  Config: Bed ${BED_W}x${BED_H}mm, Res ${RESOLUTION}mm/px`);
     console.log(`🔧 Mode: ${PREVIEW_ONLY ? 'PREVIEW ONLY' : 'EXPORT'} | Verbose: ${VERBOSE}`);
+    if (GENERATE_STLS) console.log(`🔨 OpenSCAD STL Generation: ACTIVE (Path: ${OPENSCAD_PATH})`);
 
     const { SeamFinder } = await import('./prototypes/SeamFinderInfo');
 
@@ -163,9 +169,28 @@ async function run(inputFile: string, opts: any) {
     if (!PREVIEW_ONLY) {
         console.log("\n--- FASE 5: Exporting Tiles Layout SVG ---");
         if (!fs.existsSync(OUT_DIR)) fs.mkdirSync(OUT_DIR, { recursive: true });
-        // Use standard name for output
-        await SvgExporter.generateFromPaths(verticalPaths, horizontalPaths, widthMm, heightMm, OUT_DIR);
-        console.log(`✅ SVG generato in: ${OUT_DIR}`);
+
+        // Export SVGs
+        const generatedTiles = await SvgExporter.generateFromPaths(verticalPaths, horizontalPaths, widthMm, heightMm, OUT_DIR);
+        console.log(`✅ ${generatedTiles.length} Tile SVGs generati in: ${OUT_DIR}`);
+
+        // FASE 6: OpenSCAD STL Generation
+        if (GENERATE_STLS) {
+            console.log("\n--- FASE 6: Generazione STL con OpenSCAD ---");
+            const scadGen = new ScadGenerator(OPENSCAD_PATH);
+
+            for (const tileSvg of generatedTiles) {
+                const tileName = path.basename(tileSvg, '.svg');
+                const stlOut = path.join(OUT_DIR, `${tileName}.stl`);
+
+                try {
+                    await scadGen.generateTileStl(stlPath, tileSvg, stlOut, 100); // 100mm extrusion height
+                    console.log(`   ✨ Generated: ${path.basename(stlOut)}`);
+                } catch (e) {
+                    console.error(`   ❌ Failed to generate STL for ${tileName}`);
+                }
+            }
+        }
     }
 
     console.log("\n✅ Processo completato!");
