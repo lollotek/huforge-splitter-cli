@@ -1,5 +1,6 @@
 import fs from 'fs';
 import { Point } from '../core/GuideParser';
+import path from 'path';
 
 // Helper for loose intersection
 function getPolylineIntersection(metrics: { width: number, height: number }, vPath: Point[], hPath: Point[]): Point {
@@ -145,8 +146,8 @@ export class SvgExporter {
     }
 
     // 3. Generate Tiles content
-    const explodedTiles: string[] = [];
-    const GAP = 0;
+    const explodedTiles: { svg: string, id: string }[] = [];
+    const GAP = 0; // add to exploded tiles to avoid overlapping
 
     // Calculate ViewBox bounds
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -205,19 +206,16 @@ export class SvgExporter {
         }
         d += "Z";
 
-        // Create Group
-        const labelX = (tl.x + shiftX + 2).toFixed(2);
-        const labelY = (tl.y + shiftY + 4).toFixed(2);
-
-        explodedTiles.push(`<g id="tile_r${r}_c${c}">
+        explodedTiles.push({
+          svg: `<g id="tile_r${r}_c${c}">
                     <path d="${d}" class="tile" />
-                    <text x="${labelX}" y="${labelY}">R${r} C${c}</text>
-                </g>`);
+                </g>`, id: `tile_r${r}_c${c}`
+        });
       }
     }
 
     // 4. Write File
-    const m = 10;
+    const m = 0; // increment for margin
     const vbX = minX - m;
     const vbY = minY - m;
     const vbW = (maxX - minX) + m * 2;
@@ -226,12 +224,14 @@ export class SvgExporter {
     // Fallback if empty
     if (!isFinite(vbW)) { console.warn("SVG Bounds infinite?"); return; }
 
-    let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${vbX.toFixed(2)} ${vbY.toFixed(2)} ${vbW.toFixed(2)} ${vbH.toFixed(2)}" width="${vbW}mm" height="${vbH}mm" style="background-color:white">\n`;
-    svg += `<style> .tile { fill:#f0f0f0; stroke:black; stroke-width:0.2px; } text { font-family:sans-serif; font-size:4px; fill:red; } </style>\n`;
-    svg += explodedTiles.join('\n');
-    svg += `\n</svg>`;
-
-    fs.writeFileSync(outputPath, svg);
-    console.log(`💾 SVG Layout saved to: ${outputPath}`);
+    explodedTiles.forEach(tile => {
+      let svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${vbX.toFixed(2)} ${vbY.toFixed(2)} ${vbW.toFixed(2)} ${vbH.toFixed(2)}" width="${vbW}mm" height="${vbH}mm" style="background-color:white">\n`;
+      svg += `<style> { fill:#f0f0f0; stroke:none; } </style>\n`;
+      svg += tile.svg;
+      svg += `\n</svg>`;
+      const svgOut = path.join(outputPath, `${tile.id}.svg`);
+      fs.writeFileSync(svgOut, svg);
+      console.log(`💾 SVG Layout saved: ${svgOut}`);
+    });
   }
 }

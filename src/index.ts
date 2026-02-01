@@ -35,9 +35,9 @@ program
     .option('-f, --fix-manifold', 'Ripara mesh non-manifold usando manifold-3d dopo il clipping', false)
     .option('--repair-admesh', 'Ripara con admesh CLI (se installato)', false)
     .option('--autofix', 'Alias per --repair-admesh (Auto-fix manifold errors)', false)
-    .option('--autofix', 'Alias per --repair-admesh (Auto-fix manifold errors)', false)
     .option('--repair-meshlab', 'Ripara con meshlab CLI (se installato)', false)
     .option('--svg-export', 'Esporta il layout dei tile in un unico file SVG (Experimental)', false)
+    .option('--svg-mode', 'Usa modalità SVG ', false)
     .action(async (file, options) => {
         await run(file, options);
     });
@@ -59,12 +59,19 @@ async function run(inputFile: string, opts: any) {
     const REPAIR_ADMESH = opts.repairAdmesh || opts.autofix;
     const REPAIR_MESHLAB = opts.repairMeshlab;
     const SVG_EXPORT = opts.svgExport;
+    const SVG_MODE = opts.svgMode;
 
     if (!fs.existsSync(stlPath)) { console.error("File non trovato"); process.exit(1); }
 
     console.log(`🚀 Avvio HueSlicer su: ${path.basename(stlPath)}`);
     console.log(`⚙️  Config: Bed ${BED_W}x${BED_H}mm, Tolleranza ${TOLERANCE}mm`);
     console.log(`🔧 Mode: ${PREVIEW_ONLY ? 'PREVIEW' : 'EXPORT'} | Clip: ${CLIP_MODE} | Cap: ${CAP_MODE} | Verbose: ${VERBOSE}`);
+
+    // Branch to Clip mode if enabled (preferred for large meshes)
+    if (SVG_MODE) {
+        await runSvgMode(stlPath, GUIDE_FILE, OUT_DIR, PREVIEW_ONLY, VERBOSE, RESOLUTION, SVG_EXPORT);
+        return;
+    }
 
     // Branch to Clip mode if enabled (preferred for large meshes)
     if (CLIP_MODE) {
@@ -350,4 +357,157 @@ async function runClipMode(
     console.log("\n✅ Clip mode completato (Streaming)!");
 }
 
+async function runSvgMode(
+    stlPath: string,
+    guideFile: string | undefined,
+    outDir: string,
+    previewOnly: boolean,
+    verbose: boolean,
+    resolution: number,
+    svgExport: boolean = false
+) {
+    if (!guideFile) {
+        console.error("❌ Clip mode richiede un file guida (-g)");
+        process.exit(1);
+    }
+
+    const { SeamFinder } = await import('./prototypes/SeamFinderInfo');
+
+    // 1. Genera HeightMap per trovare seam paths ottimali
+    console.log("\n--- FASE 1: Analisi Topologica ---");
+    const mapData = await HeightMapper.stlToGrid(stlPath, resolution);
+    const widthMm = mapData.width * resolution;
+    const heightMm = mapData.height * resolution;
+
+    // Leggi STL per ottenere bounding box COMPLETO
+    const stlBuffer = fs.readFileSync(stlPath);
+    const triangleCount = stlBuffer.readUInt32LE(80);
+    console.log(`   Triangles: ${triangleCount}`);
+
+    // Usa TriangleClipper per calcolare bbox completo
+    const tempClipper = new TriangleClipper(false);
+    const fullBbox = tempClipper.getBoundingBox(stlBuffer);
+    const globalMinX = fullBbox.minX;
+    const globalMaxY = fullBbox.maxY;
+    const globalMinY = fullBbox.minY;
+    const globalMaxX = fullBbox.maxX;
+
+    if (verbose) {
+        console.log(`   Global BBox: X[${fullBbox.minX.toFixed(1)}, ${fullBbox.maxX.toFixed(1)}] Y[${fullBbox.minY.toFixed(1)}, ${fullBbox.maxY.toFixed(1)}]`);
+    }
+
+    // 2. Parse Guide SVG per estrarre seam paths
+    console.log("\n--- FASE 2: Estrazione Seam Paths ---");
+    const guides = GuideParser.parse(guideFile, mapData.width, mapData.height);
+
+    // Estrai paths (world coords mm) usando SeamFinder
+    const verticalPaths: { x: number, y: number }[][] = [];
+    const horizontalPaths: { x: number, y: number }[][] = [];
+
+    const scaleX = widthMm / mapData.width;
+    const scaleY = heightMm / mapData.height;
+
+    for (const mask of guides.verticals) {
+        const finder = new SeamFinder(mapData.grid, mapData.width, mapData.height);
+        finder.setMask(mask);
+        const seamPixels = finder.findVerticalSeam(0, mapData.width - 1);
+        // Converti pixel -> world coords mm
+        const seamMm = seamPixels.map((p: { x: number, y: number }) => ({
+            x: globalMinX + p.x * scaleX,
+            y: globalMaxY - p.y * scaleY  // Y invertito
+        }));
+        if (seamMm.length > 0) {
+            // SNAP TO BOUNDS (Fix gap error)
+            // Vertical seam flows along Y. Start (Top) should be MaxY, End (Bottom) should be MinY.
+            // Coordinate mapping: y = globalMaxY - p.y * scaleY
+            // p.y=0 -> y=globalMaxY. p.y=Height -> y=globalMinY.
+            // Force first point to Top, last point to Bottom.
+            seamMm[0].y = globalMaxY;
+            seamMm[seamMm.length - 1].y = globalMinY;
+
+            verticalPaths.push(seamMm);
+        }
+
+        if (verbose && seamMm.length > 0) {
+            const xMin = Math.min(...seamMm.map((p: { x: number, y: number }) => p.x)).toFixed(1);
+            const xMax = Math.max(...seamMm.map((p: { x: number, y: number }) => p.x)).toFixed(1);
+            console.log(`   Vertical path: X range [${xMin}, ${xMax}] (Snapped Y)`);
+        }
+    }
+
+    for (const mask of guides.horizontals) {
+        // Transpose HeightMap manually
+        const transposedGrid = new Float32Array(mapData.width * mapData.height);
+        for (let y = 0; y < mapData.height; y++) {
+            for (let x = 0; x < mapData.width; x++) {
+                transposedGrid[x * mapData.height + y] = mapData.grid[y * mapData.width + x];
+            }
+        }
+        const transposedW = mapData.height;
+        const transposedH = mapData.width;
+
+        const transposedMask = transposeMask(mask);
+        const finder = new SeamFinder(transposedGrid, transposedW, transposedH);
+        finder.setMask(transposedMask);
+        const seamPixels = finder.findVerticalSeam(0, transposedW - 1);
+        const seamMm = seamPixels.map((p: { x: number, y: number }) => ({
+            x: globalMinX + p.y * scaleX,   // Trasposto
+            y: globalMaxY - p.x * scaleY    // Trasposto + invertito
+        }));
+        if (seamMm.length > 0) {
+            // SNAP TO BOUNDS (Fix gap error)
+            // Horizontal seam flows along X. Start (Left) should be MinX, End (Right) should be MaxX.
+            // Coordinate mapping: x = globalMinX + p.y * scaleX (Transposed logic)
+            // p.y (original x) = 0 -> x=globalMinX.
+
+            seamMm[0].x = globalMinX;
+            seamMm[seamMm.length - 1].x = globalMaxX;
+
+            horizontalPaths.push(seamMm);
+        }
+
+        if (verbose && seamMm.length > 0) {
+            const yMin = Math.min(...seamMm.map((p: { x: number, y: number }) => p.y)).toFixed(1);
+            const yMax = Math.max(...seamMm.map((p: { x: number, y: number }) => p.y)).toFixed(1);
+            console.log(`   Horizontal path: Y range [${yMin}, ${yMax}] (Snapped X)`);
+        }
+    }
+
+    // SORT: Ensure paths are spatially ordered (Left->Right, Top->Bottom)
+    verticalPaths.sort((a, b) => {
+        const avgA = a.reduce((sum, p) => sum + p.x, 0) / a.length;
+        const avgB = b.reduce((sum, p) => sum + p.x, 0) / b.length;
+        return avgA - avgB;
+    });
+
+    horizontalPaths.sort((a, b) => {
+        const avgA = a.reduce((sum, p) => sum + p.y, 0) / a.length;
+        const avgB = b.reduce((sum, p) => sum + p.y, 0) / b.length;
+        return avgA - avgB;
+    });
+
+    console.log(`   -> ${verticalPaths.length} vertical, ${horizontalPaths.length} horizontal paths (Sorted)`);
+
+
+    // 4. Generate SVG Preview
+    if (guideFile && !previewOnly) {
+        const svgPath = path.join(outDir, '_preview_cuts.svg');
+        console.log(`\n--- Generating Preview: ${svgPath} ---`);
+        // SvgBuilder constructor takes (width, height)
+        const builder = new SvgBuilder(widthMm, heightMm);
+
+        verticalPaths.forEach(p => builder.addCutLine(p, 'red'));
+        horizontalPaths.forEach(p => builder.addCutLine(p, 'blue'));
+
+        builder.save(svgPath);
+    }
+
+    // --- FASE 5: SVG Export (New) ---
+    if (svgExport) {
+        await SvgExporter.generateFromPaths(verticalPaths, horizontalPaths, widthMm, heightMm, outDir);
+    }
+
+
+    console.log("\n✅ Clip mode completato (Streaming)!");
+}
 program.parse(process.argv);
