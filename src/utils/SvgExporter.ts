@@ -239,4 +239,58 @@ export class SvgExporter {
 
     return generatedFiles;
   }
+
+  public static async generateFromPolygons(
+    polygons: Point[][],
+    width: number,
+    height: number,
+    outputPath: string
+  ): Promise<string[]> {
+    console.log(`\n--- SVG Export (From Watershed Polygons) ---`);
+    console.log(`Tiles: ${polygons.length}`);
+
+    const generatedFiles: string[] = [];
+
+    // Calculate Global Bounds
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const poly of polygons) {
+      for (const p of poly) {
+        minX = Math.min(minX, p.x);
+        maxX = Math.max(maxX, p.x);
+        minY = Math.min(minY, p.y);
+        maxY = Math.max(maxY, p.y);
+      }
+    }
+
+    const m = 0;
+    const vbX = minX !== Infinity ? minX - m : 0;
+    const vbY = minY !== Infinity ? minY - m : 0;
+    const vbW = minX !== Infinity ? (maxX - minX) + m * 2 : width;
+    const vbH = minY !== Infinity ? (maxY - minY) + m * 2 : height;
+
+    // Fallback
+    if (!isFinite(vbW)) { console.warn("SVG Bounds infinite?"); return []; }
+
+    for (let i = 0; i < polygons.length; i++) {
+      const poly = polygons[i];
+
+      let d = `M ${poly[0].x.toFixed(2)} ${poly[0].y.toFixed(2)} `;
+      for (let k = 1; k < poly.length; k++) {
+        d += `L ${poly[k].x.toFixed(2)} ${poly[k].y.toFixed(2)} `;
+      }
+      d += "Z";
+
+      let svgContent = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${vbX.toFixed(2)} ${vbY.toFixed(2)} ${vbW.toFixed(2)} ${vbH.toFixed(2)}" width="${vbW}mm" height="${vbH}mm" style="background-color:white">\n`;
+      svgContent += `<style> .tile { fill:#f0f0f0; stroke:none; } </style>\n`;
+      svgContent += `<g id="tile_${i}"> <path d="${d}" class="tile" /> </g>`;
+      svgContent += `\n</svg>`;
+
+      const svgOut = path.join(outputPath, `tile_${i}.svg`);
+      fs.writeFileSync(svgOut, svgContent);
+      console.log(`💾 SVG Layout saved: ${svgOut}`);
+      generatedFiles.push(svgOut);
+    }
+
+    return generatedFiles;
+  }
 }
