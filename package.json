@@ -13,8 +13,10 @@
     "test-algo": "ts-node src/prototypes/test-seam.ts"
   },
   "dependencies": {
+    "@types/earcut": "^3.0.0",
     "canvas": "^3.2.1",
     "commander": "^11.0.0",
+    "earcut": "^3.0.2",
     "manifold-3d": "^2.5.1",
     "path2d": "^0.3.1",
     "sharp": "^0.32.0",
