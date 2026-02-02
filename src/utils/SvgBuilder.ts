@@ -32,6 +32,12 @@ export class SvgBuilder {
         );
     }
 
+    addCircle(x: number, y: number, r: number, color: string = 'yellow', fill: string = 'none') {
+        this.elements.push(
+            `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${r}" stroke="${color}" stroke-width="2" fill="${fill}" opacity="0.8" />`
+        );
+    }
+
     save(filename: string) {
         const svgBody = `
         <svg width="${this.width}" height="${this.height}" viewBox="0 0 ${this.width} ${this.height}" xmlns="http://www.w3.org/2000/svg">
@@ -39,7 +45,7 @@ export class SvgBuilder {
             ${this.backgroundImage}
             ${this.elements.join('\n')}
         </svg>`;
-        
+
         fs.writeFileSync(filename, svgBody);
         console.log(`🖼️ SVG Preview salvata in: ${filename}`);
     }

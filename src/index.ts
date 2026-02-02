@@ -66,20 +66,30 @@ async function run(inputFile: string, opts: any) {
     let watershedPolygons: { x: number, y: number }[][] = [];
     let generatedTilesFilePaths: string[] = [];
 
+    // Visualization Debug Data
+    let vizSeeds: { x: number, y: number, label: number }[] = [];
+    let vizBarriers: { x: number, y: number }[][] = [];
+
+    // Helper: Transpone una maschera booleana 2D
+    function transposeMask(mask: boolean[][]): boolean[][] {
+        const rows = mask.length; const cols = mask[0].length;
+        const result: boolean[][] = Array(cols).fill(null).map(() => Array(rows).fill(false));
+        for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) result[x][y] = mask[y][x];
+        return result;
+    }
+
     // 2. Determine Layout (Legacy or Watershed)
     if (LEGACY) {
         console.log("\n--- FASE 2: Estrazione Seam Paths (Legacy) ---");
+        // Legacy Logic (Same as before)
         let guides: { verticals: boolean[][][], horizontals: boolean[][][] } = { verticals: [], horizontals: [] };
 
         if (GUIDE_FILE && fs.existsSync(GUIDE_FILE)) {
             guides = GuideParser.parse(GUIDE_FILE, mapData.width, mapData.height);
         } else {
             console.log("⚠️  Nessun file guida fornito. Attivazione AUTO-TILING (Grid).");
-            // Auto-Generate Guides
             const cols = Math.ceil(widthMm / BED_W);
             const rows = Math.ceil(heightMm / BED_H);
-            console.log(`   -> Auto-Layout: ${cols}x${rows} tiles (Grid based on ${BED_W}x${BED_H}mm)`);
-
             const SEARCH_WIDTH = 40;
             for (let i = 1; i < cols; i++) {
                 const xMm = i * BED_W;
@@ -98,43 +108,24 @@ async function run(inputFile: string, opts: any) {
         const scaleX = widthMm / mapData.width;
         const scaleY = heightMm / mapData.height;
 
-        // Process Verticals
         for (const mask of guides.verticals) {
             const finder = new SeamFinder(mapData.grid, mapData.width, mapData.height);
             finder.setMask(mask);
-            const seamPixels = finder.findVerticalSeam(0, mapData.width - 1);
-            const seamMm = seamPixels.map((p: any) => ({ x: p.x * scaleX, y: p.y * scaleY }));
-            if (seamMm.length > 0) {
-                seamMm[0].y = 0; seamMm[seamMm.length - 1].y = heightMm; // Snap
-                verticalPaths.push(seamMm);
-            }
+            const seamMm = finder.findVerticalSeam(0, mapData.width - 1).map((p: any) => ({ x: p.x * scaleX, y: p.y * scaleY }));
+            if (seamMm.length > 0) { seamMm[0].y = 0; seamMm[seamMm.length - 1].y = heightMm; verticalPaths.push(seamMm); }
         }
 
-        // Process Horizontals (Transpose)
-        // ... (Simplified inline logic or helper?)
-        function transposeMask(mask: boolean[][]): boolean[][] {
-            const rows = mask.length; const cols = mask[0].length;
-            const result: boolean[][] = Array(cols).fill(null).map(() => Array(rows).fill(false));
-            for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) result[x][y] = mask[y][x];
-            return result;
-        }
         const transposedGrid = new Float32Array(mapData.width * mapData.height);
         for (let y = 0; y < mapData.height; y++)
-            for (let x = 0; x < mapData.width; x++)
-                transposedGrid[x * mapData.height + y] = mapData.grid[y * mapData.width + x];
+            for (let x = 0; x < mapData.width; x++) transposedGrid[x * mapData.height + y] = mapData.grid[y * mapData.width + x];
 
         for (const mask of guides.horizontals) {
             const transposedW = mapData.height;
             const transposedH = mapData.width;
-            const transposedMask = transposeMask(mask);
             const finder = new SeamFinder(transposedGrid, transposedW, transposedH);
-            finder.setMask(transposedMask);
-            const seamPixels = finder.findVerticalSeam(0, transposedW - 1);
-            const seamMm = seamPixels.map((p: any) => ({ x: p.y * scaleX, y: p.x * scaleY }));
-            if (seamMm.length > 0) {
-                seamMm[0].x = 0; seamMm[seamMm.length - 1].x = widthMm; // Snap
-                horizontalPaths.push(seamMm);
-            }
+            finder.setMask(transposeMask(mask));
+            const seamMm = finder.findVerticalSeam(0, transposedW - 1).map((p: any) => ({ x: p.y * scaleX, y: p.x * scaleY }));
+            if (seamMm.length > 0) { seamMm[0].x = 0; seamMm[seamMm.length - 1].x = widthMm; horizontalPaths.push(seamMm); }
         }
 
     } else {
@@ -144,56 +135,92 @@ async function run(inputFile: string, opts: any) {
         // 1. Prepare Seeds (Grid Centers)
         const cols = Math.ceil(widthMm / BED_W);
         const rows = Math.ceil(heightMm / BED_H);
-        const seeds: { x: number, y: number, label: number }[] = [];
         let labelCounter = 1;
 
         console.log(`   -> Grid Strategy: ${cols}x${rows} tiles anticipated.`);
 
         for (let j = 0; j < rows; j++) {
             for (let i = 0; i < cols; i++) {
-                const cxMm = (i + 0.5) * BED_W; // Midpoint of intended tile
+                const cxMm = (i + 0.5) * BED_W;
                 const cyMm = (j + 0.5) * BED_H;
-
-                // Clamp to image bounds
                 const cxMmClamped = Math.min(Math.max(cxMm, 0), widthMm - 1);
                 const cyMmClamped = Math.min(Math.max(cyMm, 0), heightMm - 1);
-
                 const cx = Math.floor((cxMmClamped / widthMm) * mapData.width);
                 const cy = Math.floor((cyMmClamped / heightMm) * mapData.height);
-                seeds.push({ x: cx, y: cy, label: labelCounter++ });
+                vizSeeds.push({ x: cxMmClamped, y: cyMmClamped, label: labelCounter }); // Store for Visualization (MM Coords)
+                // Pass Pixel Coords to Segmenter
+                // Wait, we need to add to 'seeds' list passed to segmenter
             }
         }
-        console.log(`   -> Placed ${seeds.length} seeds.`);
+
+        // Populate actual seeds array for Segmenter
+        const seedsForSegmenter: { x: number, y: number, label: number }[] = [];
+        let lbl = 1;
+        for (let j = 0; j < rows; j++) {
+            for (let i = 0; i < cols; i++) {
+                const cxMm = (i + 0.5) * BED_W;
+                const cyMm = (j + 0.5) * BED_H;
+                const cxMmClamped = Math.min(Math.max(cxMm, 0), widthMm - 1);
+                const cyMmClamped = Math.min(Math.max(cyMm, 0), heightMm - 1);
+                const cx = Math.floor((cxMmClamped / widthMm) * mapData.width);
+                const cy = Math.floor((cyMmClamped / heightMm) * mapData.height);
+                seedsForSegmenter.push({ x: cx, y: cy, label: lbl++ });
+            }
+        }
+
+        console.log(`   -> Placed ${seedsForSegmenter.length} seeds.`);
+
+        // 2. Preparing Guides & Barriers
+        let guides: { verticals: boolean[][][], horizontals: boolean[][][] } = { verticals: [], horizontals: [] };
+
+        if (GUIDE_FILE && fs.existsSync(GUIDE_FILE)) {
+            guides = GuideParser.parse(GUIDE_FILE, mapData.width, mapData.height);
+            console.log("   -> Used provided Guide File for barriers.");
+        } else {
+            // AUTO-GENERATE GUIDES for Watershed Barriers too!
+            console.log("   -> Auto-Generating Guides for Watershed Barriers.");
+            const SEARCH_WIDTH = 2; // Narrower for Watershed barriers? Or same?
+            // Actually, GuideParser.rasterizePath creates a boolean mask.
+            // If we want a sharp line, width should be small.
+
+            for (let i = 1; i < cols; i++) {
+                const xMm = i * BED_W;
+                const xPx = (xMm / widthMm) * mapData.width;
+                const pathString = `M ${xPx} 0 L ${xPx} ${mapData.height}`;
+                guides.verticals.push(GuideParser.rasterizePath(pathString, SEARCH_WIDTH, mapData.width, mapData.height));
+                // Add to viz
+                vizBarriers.push([{ x: xMm, y: 0 }, { x: xMm, y: heightMm }]);
+            }
+            for (let j = 1; j < rows; j++) {
+                const yMm = j * BED_H;
+                const yPx = (yMm / heightMm) * mapData.height;
+                const pathString = `M 0 ${yPx} L ${mapData.width} ${yPx}`;
+                guides.horizontals.push(GuideParser.rasterizePath(pathString, SEARCH_WIDTH, mapData.width, mapData.height));
+                // Add to viz
+                vizBarriers.push([{ x: 0, y: yMm }, { x: widthMm, y: yMm }]);
+            }
+        }
 
         // 2. Segment
         const segmenter = new WatershedSegmenter(mapData.width, mapData.height, mapData.grid);
 
-        // Apply Barriers from Guide if present
-        if (GUIDE_FILE && fs.existsSync(GUIDE_FILE)) {
-            const guides = GuideParser.parse(GUIDE_FILE, mapData.width, mapData.height);
-            // Use both verticals and horizontal paths as barriers
-            for (const mask of guides.verticals) segmenter.applyBarriers(mask, 5000);
-            for (const mask of guides.horizontals) segmenter.applyBarriers(mask, 5000);
-            console.log("   -> Applied Guide Barriers (High Cost).");
-        }
+        // Apply Barriers
+        for (const mask of guides.verticals) segmenter.applyBarriers(mask, 15000); // Stronger penalty?
+        for (const mask of guides.horizontals) segmenter.applyBarriers(mask, 15000);
+        console.log("   -> Applied Barriers.");
 
-        const labels = segmenter.segment(seeds);
+        const labels = segmenter.segment(seedsForSegmenter);
         console.log("   -> Segmentation complete.");
 
         // 3. Trace
         const tracer = new BoundaryTracer(mapData.width, mapData.height, labels);
         const polygonsMap = tracer.traceAll();
 
-        // Convert to SVG MM Coords
         const scaleX = widthMm / mapData.width;
         const scaleY = heightMm / mapData.height;
 
         for (const poly of polygonsMap.values()) {
-            // Simplify and Scale
-            const scaledPoly = poly.map(p => ({
-                x: p.x * scaleX,
-                y: p.y * scaleY
-            }));
+            const scaledPoly = poly.map(p => ({ x: p.x * scaleX, y: p.y * scaleY }));
             watershedPolygons.push(scaledPoly);
         }
         console.log(`   -> Traced ${watershedPolygons.length} polygon regions.`);
@@ -205,24 +232,18 @@ async function run(inputFile: string, opts: any) {
         const canvas = createCanvas(data.width, data.height);
         const ctx = canvas.getContext('2d');
         const imgData = ctx.createImageData(data.width, data.height);
-
         let minZ = Infinity, maxZ = -Infinity;
         for (let i = 0; i < data.grid.length; i++) {
             if (data.grid[i] > maxZ) maxZ = data.grid[i];
             if (data.grid[i] < minZ) minZ = data.grid[i];
         }
         const range = maxZ - minZ || 1;
-
         for (let i = 0; i < data.grid.length; i++) {
             const val = data.grid[i];
             const norm = Math.floor(((val - minZ) / range) * 255);
             const idx = i * 4;
-            imgData.data[idx] = norm;     // R
-            imgData.data[idx + 1] = norm; // G
-            imgData.data[idx + 2] = norm; // B
-            imgData.data[idx + 3] = 255;  // A
+            imgData.data[idx] = norm; imgData.data[idx + 1] = norm; imgData.data[idx + 2] = norm; imgData.data[idx + 3] = 255;
         }
-
         ctx.putImageData(imgData, 0, 0);
         return canvas.toDataURL();
     }
@@ -247,6 +268,14 @@ async function run(inputFile: string, opts: any) {
         } else {
             // Visualize Watershed Polygons
             watershedPolygons.forEach(p => builder.addCutLine(p, 'lime'));
+
+            // Debug: Visualize Seeds
+            vizSeeds.forEach(s => builder.addCircle(s.x, s.y, 5, 'white', 'none'));
+            console.log("   -> Visualize Seeds (Circles)");
+
+            // Debug: Visualize Barriers
+            vizBarriers.forEach(p => builder.addCutLine(p, 'yellow'));
+            console.log("   -> Visualize Barriers (Yellow Lines)");
         }
 
         builder.save(svgPath);
