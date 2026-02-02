@@ -62,7 +62,7 @@ export class GuideParser {
         return guides;
     }
 
-    private static rasterizePath(pathData: string, strokeWidth: number, w: number, h: number): boolean[][] {
+    public static rasterizePath(pathData: string, strokeWidth: number, w: number, h: number): boolean[][] {
         const canvas = createCanvas(w, h);
         const ctx = canvas.getContext('2d');
 

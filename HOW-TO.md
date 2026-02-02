@@ -1,93 +1,73 @@
 # HueSlicer CLI - Manuale Utente
 
-HueSlicer CLI è uno strumento avanzato per tagliare (slicing) modelli STL di grandi dimensioni (es. HueForge) in "piastrelle" (tiles) più piccole, seguendo percorsi di taglio personalizzati definiti via SVG.
+HueSlicer CLI è uno strumento per dividere (tiling) modelli STL di grandi dimensioni (es. HueForge) in parti più piccole, ottimizzando i tagli per nascondere le giunzioni.
 
-Il tool è progettato per preservare al 100% la geometria originale (nessuna voxelizzazione) e gestire file di grandi dimensioni senza esaurire la memoria (Streaming Slicer).
+> **Nuova Architettura**: Dalla versione 1.0, il tool si concentra sulla generazione di layout di taglio SVG intelligenti e usa **OpenSCAD** per generare i modelli 3D finali.
 
 ## 📋 Prerequisiti
 
 ### Obbligatori
 - **Node.js** (v18 o superiore)
-- **NPM** (incluso in Node.js)
-
-### Opzionali (per Auto-Repair)
-Per utilizzare la funzionalità di riparazione automatica (`--autofix`):
-- **ADMesh**: Tool command-line leggero e veloce.
-- **PrusaSlicer**: Se installato (e disponibile nel PATH come `prusa-slicer-console` o `prusa-slicer`), viene rilevato automaticamente e usato per la riparazione.
-  *Nota*: Assicurarsi che la versione installata supporti il flag `--repair`.
-
-Se nessuno dei due è trovato, `--autofix` verrà ignorato con un warning.
+- **OpenSCAD**: Necessario per generare i file STL finali (comando `--generate-stls`). Assicurati che sia installato e accessibile da terminale o specifica il percorso.
 
 ## 🚀 Installazione
 
-1. Clonare o scaricare la repository.
-2. Aprire un terminale nella cartella del progetto.
-3. Installare le dipendenze:
+1. Clonare la repository.
+2. Installare le dipendenze:
    ```bash
    npm install
+   npm run build
    ```
 
-## 📖 Utilizzo Base
+## 📖 Utilizzo
 
-Il comando principale si esegue tramite `npx ts-node src/index.ts`.
+Il comando base si esegue tramite `node dist/index.js`.
 
-### 1. Taglio Standard (Consigliato)
-Taglia un file STL usando una maschera SVG, attivando lo Streaming Slicer (`-c`) per la massima stabilità e qualità.
-
-```bash
-npx ts-node src/index.ts "input/mio_modello.stl" -g "input/guide.svg" -c -r 0.5 --autofix
-```
-
-### 2. Solo Anteprima
-Genera solo un'immagine SVG (`_preview_cuts.svg`) per verificare dove verranno effettuati i tagli, senza processare l'STL (molto veloce).
+### 1. Anteprima Automatica (Auto-Tiling)
+Se non hai un file guida, HueSlicer calcolerà automaticamente una griglia basata sulle dimensioni del tuo piatto di stampa.
 
 ```bash
-npx ts-node src/index.ts "input/mio_modello.stl" -g "input/guide.svg" -p
+node dist/index.js "input/modello.stl" -w 200 -h 200 --preview
 ```
+*   Genera `_preview_cuts.svg`: un'immagine che mostra dove verranno effettuati i tagli (linee rosse/blu) sovrapposti alla mappa di altezze del modello.
+
+### 2. Taglio con Guida Personalizzata
+Per un controllo preciso, disegna le linee di guida in un software vettoriale (Inkscape/Illustrator) e salvale come SVG.
+*   Lo spessore della linea (`stroke-width`) nel file SVG determina quanto il taglio può "deviare" per cercare il percorso migliore. Linee più spesse = più libertà (seam carving).
+
+```bash
+node dist/index.js "input/modello.stl" -g "guide.svg" --preview
+```
+
+### 3. Generazione e Export STL
+Per generare i file finali pronti per la stampa, usa l'opzione `--generate-stls`.
+
+```bash
+node dist/index.js "modello.stl" -w 200 -h 200 --generate-stls --openscad "C:/Program Files/OpenSCAD/openscad.exe"
+```
+*   Se OpenSCAD è nel PATH di sistema, puoi omettere `--openscad`.
+*   Il processo genererà un file STL separato per ogni tile nella cartella di output.
 
 ## ⚙️ Opzioni e Flag
 
-| Flag | Variante | Descrizione | Default | Note |
-|------|----------|-------------|---------|------|
-| `-g` | `--guide` | **[Richiesto]** Percorso al file SVG con le linee guida di taglio. | - | L'SVG deve avere le stesse dimensioni (pixel) della HeightMap attesa o proporzioni corrette. |
-| `-c` | `--clip` | **[Consigliato]** Usa la modalità **Streaming Slicer**. Necessario per file grandi e per evitare OOM. | `false` | Se omesso, usa una modalità legacy. Usalo sempre per HueForge. |
-| `-r` | `--resolution` | Risoluzione di analisi (mm/pixel). Definisce quanto densa è la griglia di navigazione. | `0.5` | `0.5` è un buon compromesso. `0.1` è più preciso ma più lento. |
-| `--autofix`| `-f` | Tenta di riparare automaticamente i file generati usando `admesh`. | `false` | Richiede `admesh` installato nel sistema. |
-| `--svg-export`| - | Esporta il layout 2D dei tile in un singolo file SVG. | `false` | Utile per taglio laser o CNC. I tile sono separati (exploded view). |
-| `-o` | `--out` | Cartella di output dove salvare i file STL generati. | `output` | La cartella viene creata se non esiste. |
-| `-p` | `--preview` | Genera solo l'anteprima dei tagli (SVG) senza creare i file STL. | `false` | Utile per debuggare le guide SVG. |
-| `-w` | `--width` | Larghezza fisica del piatto (mm). | `200` | Usato per il calcolo della griglia. |
-| `-h` | `--height` | Altezza fisica del piatto (mm). | `200` | Usato per il calcolo della griglia. |
-| `-v` | `--verbose` | Attiva log dettagliati nel terminale. | `false` | Utile per debug avanzato. |
-
-## 🛠️ Guida ai File SVG
-
-Il file SVG (`-g`) serve a indicare *dove* tagliare. HueSlicer cerca percorsi (pixellati) in base al colore delle linee o maschere.
-
-- Assicurati che l'SVG abbia dimensioni e proporzioni coerenti con il modello.
-- Usa colori distinti o livelli per le linee di taglio verticali e orizzontali (configurabile in `src/core/GuideParser.ts` se necessario, di default parseggia maschere binarie).
+| Flag | Descrizione | Default | Note |
+|------|-------------|---------|------|
+| `-g`, `--guide` | File SVG con le linee guida. | (Auto) | Se omesso, usa Auto-Tiling. |
+| `-w`, `--width` | Larghezza piatto (mm). | `200` | Fondamentale per Auto-Tiling. |
+| `-h`, `--height` | Altezza piatto (mm). | `200` | Fondamentale per Auto-Tiling. |
+| `--preview` | Genera solo l'anteprima SVG. | `false` | Utile per verificare i tagli. |
+| `--generate-stls` | Attiva la generazione dei file STL finali. | `false` | Richiede OpenSCAD. |
+| `--openscad` | Percorso dell'eseguibile OpenSCAD. | `openscad` | Necessario se non è nel PATH globale. |
+| `-o`, `--out` | Cartella di output. | `output` | |
+| `-r`, `--resolution` | Risoluzione analisi (mm/pixel). | `0.5` | Valori più bassi = più precisione ma più lenti. |
+| `-v`, `--verbose` | Log dettagliati. | `false` | |
 
 ## 🔧 Risoluzione Problemi
 
-### "Percorso impossibile / No Path Found"
-Significa che il Seam Finder non riesce a trovare un percorso valido da un lato all'altro della griglia senza attraversare zone "proibite" o uscire dai bordi.
-- **Soluzione**: Aumenta la risoluzione (`-r 0.5` invece di `0.1`).
-- **Soluzione**: Controlla che le linee guida nell'SVG tocchino effettivamente i bordi dell'immagine.
+### "I tagli non seguono bene i dettagli"
+*   Se usi Auto-Tiling, prova a creare un file guida personalizzato.
+*   Se usi un file guida, aumenta lo spessore delle linee (`stroke-width`) nel tuo editor SVG per dare più "spazio di manovra" all'algoritmo.
 
-### "Out of Memory (OOM)"
-- **Soluzione**: Assicurati di usare sempre il flag `-c` (Streaming Mode). Questa modalità usa memoria costante indipendentemente dalla grandezza del file.
-
-### "Non-Manifold Edges" / Modello aperto
-Lo Streaming Slicer è molto preciso ma la virgola mobile può lasciare micro-buchi (epsilon).
-- **Soluzione**: Usa il flag `--autofix`. Questo lancerà `admesh` per chiudere automaticamente i micro-buchi (stitch).
-
-## 📦 Output
-
-Il tool genererà file nella cartella di output con la seguente nomenclatura:
-`tile_r{RIGA}_c{COLONNA}.stl`
-
-Esempio:
-- `tile_r0_c0.stl`: In alto a sinistra.
-- `tile_r0_c1.stl`: In alto a destra.
-- `tile_r1_c0.stl`: In basso a sinistra.
-... ecc.
+### "Errore durante generazione STL"
+*   Verifica che OpenSCAD sia installato correttamente.
+*   Controlla i log con `-v` per vedere l'errore specifico di OpenSCAD.
