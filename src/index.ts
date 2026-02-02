@@ -21,6 +21,7 @@ program
     .option('-h, --height <number>', 'Altezza piatto (mm)', '200')
     .option('-r, --resolution <number>', 'Risoluzione HeightMap (mm/pixel), default 0.5', '0.5')
     .option('-o, --out <path>', 'Cartella di output', 'output')
+    .option('--search-width <number>', 'Larghezza ricerca per auto-tiling (px)', '100')
     .option('-v, --verbose', 'Attiva log di debug', false)
     .option('--preview', 'Genera solo anteprima SVG, non esporta i singoli tile', false)
     .option('--preview-only', 'Genera solo anteprima SVG, non esporta i singoli tile', false)
@@ -44,6 +45,7 @@ async function run(inputFile: string, opts: any) {
     const GENERATE_STLS = opts.generateStls;
     const OPENSCAD_PATH = opts.openscad;
     const LEGACY = opts.legacy;
+    const SEARCH_WIDTH = parseInt(opts.searchWidth);
 
     if (!fs.existsSync(stlPath)) { console.error("File non trovato"); process.exit(1); }
 
@@ -60,6 +62,15 @@ async function run(inputFile: string, opts: any) {
     const widthMm = mapData.width * RESOLUTION;
     const heightMm = mapData.height * RESOLUTION;
 
+    const cols = Math.ceil(widthMm / BED_W);
+    const rows = Math.ceil(heightMm / BED_H);
+
+    const colsW = widthMm / cols;
+    const rowsH = heightMm / rows;
+    console.log("\n--- FASE 1: Analisi Topologica ---");
+    console.log(`   -> Grid Strategy: ${cols}x${rows} tiles anticipated.`);
+    console.log(`   -> Tile Size: ${colsW}x${rowsH}mm`);
+
     // Output containers
     let verticalPaths: { x: number, y: number }[][] = [];
     let horizontalPaths: { x: number, y: number }[][] = [];
@@ -69,6 +80,7 @@ async function run(inputFile: string, opts: any) {
     // Visualization Debug Data
     let vizSeeds: { x: number, y: number, label: number }[] = [];
     let vizBarriers: { x: number, y: number }[][] = [];
+    let segmenter: WatershedSegmenter | null = null;
 
     // Helper: Transpone una maschera booleana 2D
     function transposeMask(mask: boolean[][]): boolean[][] {
@@ -76,6 +88,54 @@ async function run(inputFile: string, opts: any) {
         const result: boolean[][] = Array(cols).fill(null).map(() => Array(rows).fill(false));
         for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) result[x][y] = mask[y][x];
         return result;
+    }
+
+    // Helper: Generate Base64 HeightMap Image
+    function generateHeightMapImage(data: { grid: Float32Array, width: number, height: number }): string {
+        const { createCanvas } = require('canvas');
+        const canvas = createCanvas(data.width, data.height);
+        const ctx = canvas.getContext('2d');
+        const imgData = ctx.createImageData(data.width, data.height);
+        let minZ = Infinity, maxZ = -Infinity;
+        for (let i = 0; i < data.grid.length; i++) {
+            if (data.grid[i] > maxZ) maxZ = data.grid[i];
+            if (data.grid[i] < minZ) minZ = data.grid[i];
+        }
+        const range = maxZ - minZ || 1;
+        for (let i = 0; i < data.grid.length; i++) {
+            const val = data.grid[i];
+            const norm = Math.floor(((val - minZ) / range) * 255);
+            const idx = i * 4;
+            imgData.data[idx] = norm; imgData.data[idx + 1] = norm; imgData.data[idx + 2] = norm; imgData.data[idx + 3] = 255;
+        }
+        ctx.putImageData(imgData, 0, 0);
+        return canvas.toDataURL();
+    }
+
+    function generateGradientMapImage(width: number, height: number, gradient: Float32Array): string {
+        const { createCanvas } = require('canvas');
+        const canvas = createCanvas(width, height);
+        const ctx = canvas.getContext('2d');
+        const imgData = ctx.createImageData(width, height);
+        let maxG = -Infinity;
+        // Find max to normalize (Barriers should be very high, visible as "light")
+        for (let i = 0; i < gradient.length; i++) if (gradient[i] > maxG) maxG = gradient[i];
+        const range = maxG || 1;
+
+        console.log("Max Gradient: ", maxG);
+
+        for (let i = 0; i < gradient.length; i++) {
+            const val = gradient[i];
+            // Normalize: 0 = Black, Max = White
+            const norm = Math.floor((val / range) * 255);
+            const idx = i * 4;
+            imgData.data[idx] = norm;     // R 
+            imgData.data[idx + 1] = norm; // G
+            imgData.data[idx + 2] = norm; // B
+            imgData.data[idx + 3] = 255;  // A
+        }
+        ctx.putImageData(imgData, 0, 0);
+        return canvas.toDataURL();
     }
 
     // 2. Determine Layout (Legacy or Watershed)
@@ -88,17 +148,15 @@ async function run(inputFile: string, opts: any) {
             guides = GuideParser.parse(GUIDE_FILE, mapData.width, mapData.height);
         } else {
             console.log("⚠️  Nessun file guida fornito. Attivazione AUTO-TILING (Grid).");
-            const cols = Math.ceil(widthMm / BED_W);
-            const rows = Math.ceil(heightMm / BED_H);
-            const SEARCH_WIDTH = 40;
+            console.log(`⚠️  Nessun file guida fornito. Attivazione AUTO-TILING (Grid). Search Width: ${SEARCH_WIDTH}`);
             for (let i = 1; i < cols; i++) {
-                const xMm = i * BED_W;
+                const xMm = i * colsW;
                 const xPx = (xMm / widthMm) * mapData.width;
                 const pathString = `M ${xPx} 0 L ${xPx} ${mapData.height}`;
                 guides.verticals.push(GuideParser.rasterizePath(pathString, SEARCH_WIDTH, mapData.width, mapData.height));
             }
             for (let j = 1; j < rows; j++) {
-                const yMm = j * BED_H;
+                const yMm = j * rowsH;
                 const yPx = (yMm / heightMm) * mapData.height;
                 const pathString = `M 0 ${yPx} L ${mapData.width} ${yPx}`;
                 guides.horizontals.push(GuideParser.rasterizePath(pathString, SEARCH_WIDTH, mapData.width, mapData.height));
@@ -133,38 +191,24 @@ async function run(inputFile: string, opts: any) {
         console.log("\n--- FASE 2: Watershed Segmentation ---");
 
         // 1. Prepare Seeds (Grid Centers)
-        const cols = Math.ceil(widthMm / BED_W);
-        const rows = Math.ceil(heightMm / BED_H);
+        const cols = Math.ceil(widthMm / colsW);
+        const rows = Math.ceil(heightMm / rowsH);
         let labelCounter = 1;
 
         console.log(`   -> Grid Strategy: ${cols}x${rows} tiles anticipated.`);
 
-        for (let j = 0; j < rows; j++) {
-            for (let i = 0; i < cols; i++) {
-                const cxMm = (i + 0.5) * BED_W;
-                const cyMm = (j + 0.5) * BED_H;
-                const cxMmClamped = Math.min(Math.max(cxMm, 0), widthMm - 1);
-                const cyMmClamped = Math.min(Math.max(cyMm, 0), heightMm - 1);
-                const cx = Math.floor((cxMmClamped / widthMm) * mapData.width);
-                const cy = Math.floor((cyMmClamped / heightMm) * mapData.height);
-                vizSeeds.push({ x: cxMmClamped, y: cyMmClamped, label: labelCounter }); // Store for Visualization (MM Coords)
-                // Pass Pixel Coords to Segmenter
-                // Wait, we need to add to 'seeds' list passed to segmenter
-            }
-        }
-
-        // Populate actual seeds array for Segmenter
-        const seedsForSegmenter: { x: number, y: number, label: number }[] = [];
         let lbl = 1;
+        const seedsForSegmenter: { x: number, y: number, label: number }[] = [];
         for (let j = 0; j < rows; j++) {
             for (let i = 0; i < cols; i++) {
-                const cxMm = (i + 0.5) * BED_W;
-                const cyMm = (j + 0.5) * BED_H;
+                const cxMm = (i + 0.5) * colsW;
+                const cyMm = (j + 0.5) * rowsH;
                 const cxMmClamped = Math.min(Math.max(cxMm, 0), widthMm - 1);
                 const cyMmClamped = Math.min(Math.max(cyMm, 0), heightMm - 1);
                 const cx = Math.floor((cxMmClamped / widthMm) * mapData.width);
                 const cy = Math.floor((cyMmClamped / heightMm) * mapData.height);
                 seedsForSegmenter.push({ x: cx, y: cy, label: lbl++ });
+                vizSeeds.push({ x: cxMmClamped, y: cyMmClamped, label: labelCounter }); // Store for Visualization (MM Coords)
             }
         }
 
@@ -178,13 +222,10 @@ async function run(inputFile: string, opts: any) {
             console.log("   -> Used provided Guide File for barriers.");
         } else {
             // AUTO-GENERATE GUIDES for Watershed Barriers too!
-            console.log("   -> Auto-Generating Guides for Watershed Barriers.");
-            const SEARCH_WIDTH = 2; // Narrower for Watershed barriers? Or same?
-            // Actually, GuideParser.rasterizePath creates a boolean mask.
-            // If we want a sharp line, width should be small.
+            console.log(`   -> Auto-Generating Guides for Watershed Barriers. Search Width: ${SEARCH_WIDTH}`);
 
             for (let i = 1; i < cols; i++) {
-                const xMm = i * BED_W;
+                const xMm = i * colsW;
                 const xPx = (xMm / widthMm) * mapData.width;
                 const pathString = `M ${xPx} 0 L ${xPx} ${mapData.height}`;
                 guides.verticals.push(GuideParser.rasterizePath(pathString, SEARCH_WIDTH, mapData.width, mapData.height));
@@ -192,7 +233,7 @@ async function run(inputFile: string, opts: any) {
                 vizBarriers.push([{ x: xMm, y: 0 }, { x: xMm, y: heightMm }]);
             }
             for (let j = 1; j < rows; j++) {
-                const yMm = j * BED_H;
+                const yMm = j * rowsH;
                 const yPx = (yMm / heightMm) * mapData.height;
                 const pathString = `M 0 ${yPx} L ${mapData.width} ${yPx}`;
                 guides.horizontals.push(GuideParser.rasterizePath(pathString, SEARCH_WIDTH, mapData.width, mapData.height));
@@ -202,11 +243,11 @@ async function run(inputFile: string, opts: any) {
         }
 
         // 2. Segment
-        const segmenter = new WatershedSegmenter(mapData.width, mapData.height, mapData.grid);
+        segmenter = new WatershedSegmenter(mapData.width, mapData.height, mapData.grid);
 
         // Apply Barriers
-        for (const mask of guides.verticals) segmenter.applyBarriers(mask, 15000); // Stronger penalty?
-        for (const mask of guides.horizontals) segmenter.applyBarriers(mask, 15000);
+        for (const mask of guides.verticals) segmenter.applyBarriers(mask, 100); // Stronger penalty?
+        for (const mask of guides.horizontals) segmenter.applyBarriers(mask, 100);
         console.log("   -> Applied Barriers.");
 
         const labels = segmenter.segment(seedsForSegmenter);
@@ -226,28 +267,6 @@ async function run(inputFile: string, opts: any) {
         console.log(`   -> Traced ${watershedPolygons.length} polygon regions.`);
     }
 
-    // Helper: Generate Base64 HeightMap Image
-    function generateHeightMapImage(data: { grid: Float32Array, width: number, height: number }): string {
-        const { createCanvas } = require('canvas');
-        const canvas = createCanvas(data.width, data.height);
-        const ctx = canvas.getContext('2d');
-        const imgData = ctx.createImageData(data.width, data.height);
-        let minZ = Infinity, maxZ = -Infinity;
-        for (let i = 0; i < data.grid.length; i++) {
-            if (data.grid[i] > maxZ) maxZ = data.grid[i];
-            if (data.grid[i] < minZ) minZ = data.grid[i];
-        }
-        const range = maxZ - minZ || 1;
-        for (let i = 0; i < data.grid.length; i++) {
-            const val = data.grid[i];
-            const norm = Math.floor(((val - minZ) / range) * 255);
-            const idx = i * 4;
-            imgData.data[idx] = norm; imgData.data[idx + 1] = norm; imgData.data[idx + 2] = norm; imgData.data[idx + 3] = 255;
-        }
-        ctx.putImageData(imgData, 0, 0);
-        return canvas.toDataURL();
-    }
-
     // 4. Generate SVG Preview
     if (VERBOSE || PREVIEW_ONLY || PREVIEW) {
         if (!fs.existsSync(OUT_DIR)) fs.mkdirSync(OUT_DIR, { recursive: true });
@@ -256,7 +275,13 @@ async function run(inputFile: string, opts: any) {
         const builder = new SvgBuilder(widthMm, heightMm);
 
         try {
-            const bgImage = generateHeightMapImage(mapData);
+            let bgImage = "";
+            if (!LEGACY && segmenter) {
+                console.log("   -> Generating Gradient Map Background (Debug Mode) - Look for bright barrier lines");
+                bgImage = generateGradientMapImage(mapData.width, mapData.height, segmenter.getGradientMap());
+            } else {
+                bgImage = generateHeightMapImage(mapData);
+            }
             builder.setBackground(bgImage);
         } catch (e) {
             console.warn("   -> Failed to generate background image:", e);

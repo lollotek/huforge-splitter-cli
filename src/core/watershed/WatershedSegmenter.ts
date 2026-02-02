@@ -13,6 +13,11 @@ export class WatershedSegmenter {
     this.heightMap = heightMap;
     this.labels = new Int32Array(width * height).fill(0);
     this.gradientMap = new Float32Array(width * height);
+    this.computeGradient();
+  }
+
+  public getGradientMap(): Float32Array {
+    return this.gradientMap;
   }
 
   /**
@@ -52,10 +57,12 @@ export class WatershedSegmenter {
    * These areas become "High Walls" that are hard to cross.
    */
   public applyBarriers(barrierMask: boolean[][], penalty: number = 1000) {
+    // console.log("Applying barriers to gradient map...");
     for (let y = 0; y < this.height; y++) {
       for (let x = 0; x < this.width; x++) {
-        if (barrierMask[x][y]) { // Note: GuideParser masks are [x][y]
-          const idx = y * this.width + x;
+        const idx = y * this.width + x;
+        if (barrierMask[y][x]) {
+          const current = this.gradientMap[idx];
           this.gradientMap[idx] += penalty;
         }
       }
@@ -67,8 +74,6 @@ export class WatershedSegmenter {
    * @param seeds Array of {x, y, label}
    */
   public segment(seeds: { x: number, y: number, label: number }[]): Int32Array {
-    this.computeGradient();
-
     const pq = new PriorityQueue<number>(); // Stores Pixel Indices
 
     // 1. Initialize with Seeds
