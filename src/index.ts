@@ -6,6 +6,7 @@ import { SvgBuilder } from './utils/SvgBuilder';
 import { ScadGenerator } from './utils/ScadGenerator';
 import { WatershedSegmenter } from './core/watershed/WatershedSegmenter';
 import { BoundaryTracer } from './core/watershed/BoundaryTracer';
+import { TopologyTracer } from './core/watershed/TopologyTracer';
 import path from 'path';
 import fs from 'fs';
 
@@ -249,8 +250,9 @@ async function run(inputFile: string, opts: any) {
         const labels = segmenter.segment(seedsForSegmenter);
         console.log("   -> Segmentation complete.");
 
-        // 3. Trace
-        const tracer = new BoundaryTracer(mapData.width, mapData.height, labels);
+        // 3. Trace (Topology-Aware)
+        console.log("   -> Tracing boundaries with TopologyTracer...");
+        const tracer = new TopologyTracer(mapData.width, mapData.height, labels);
         const polygonsMap = tracer.traceAll();
 
         const scaleX = widthMm / mapData.width;
