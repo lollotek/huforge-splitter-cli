@@ -62,7 +62,6 @@ export class WatershedSegmenter {
       for (let x = 0; x < this.width; x++) {
         const idx = y * this.width + x;
         if (barrierMask[y][x]) {
-          const current = this.gradientMap[idx];
           this.gradientMap[idx] += penalty;
         }
       }

@@ -6,6 +6,7 @@ import { SvgBuilder } from './utils/SvgBuilder';
 import { ScadGenerator } from './utils/ScadGenerator';
 import { WatershedSegmenter } from './core/watershed/WatershedSegmenter';
 import { BoundaryTracer } from './core/watershed/BoundaryTracer';
+import { TopologyTracer } from './core/watershed/TopologyTracer';
 import path from 'path';
 import fs from 'fs';
 
@@ -67,8 +68,6 @@ async function run(inputFile: string, opts: any) {
 
     const colsW = widthMm / cols;
     const rowsH = heightMm / rows;
-    console.log("\n--- FASE 1: Analisi Topologica ---");
-    console.log(`   -> Grid Strategy: ${cols}x${rows} tiles anticipated.`);
     console.log(`   -> Tile Size: ${colsW}x${rowsH}mm`);
 
     // Output containers
@@ -121,8 +120,6 @@ async function run(inputFile: string, opts: any) {
         // Find max to normalize (Barriers should be very high, visible as "light")
         for (let i = 0; i < gradient.length; i++) if (gradient[i] > maxG) maxG = gradient[i];
         const range = maxG || 1;
-
-        console.log("Max Gradient: ", maxG);
 
         for (let i = 0; i < gradient.length; i++) {
             const val = gradient[i];
@@ -246,15 +243,16 @@ async function run(inputFile: string, opts: any) {
         segmenter = new WatershedSegmenter(mapData.width, mapData.height, mapData.grid);
 
         // Apply Barriers
-        for (const mask of guides.verticals) segmenter.applyBarriers(mask, 100); // Stronger penalty?
-        for (const mask of guides.horizontals) segmenter.applyBarriers(mask, 100);
+        for (const mask of guides.verticals) segmenter.applyBarriers(mask, 1); // Stronger penalty?
+        for (const mask of guides.horizontals) segmenter.applyBarriers(mask, 1);
         console.log("   -> Applied Barriers.");
 
         const labels = segmenter.segment(seedsForSegmenter);
         console.log("   -> Segmentation complete.");
 
-        // 3. Trace
-        const tracer = new BoundaryTracer(mapData.width, mapData.height, labels);
+        // 3. Trace (Topology-Aware)
+        console.log("   -> Tracing boundaries with TopologyTracer...");
+        const tracer = new TopologyTracer(mapData.width, mapData.height, labels);
         const polygonsMap = tracer.traceAll();
 
         const scaleX = widthMm / mapData.width;
